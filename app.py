@@ -10,15 +10,14 @@ from datetime import datetime, date
 load_dotenv()
 
 # OpenAI client
-openai_client = OpenAI(api_key=("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"))
+openai_client = os.getenv("OPENAI_API_KEY")    
 
 # Supabase client
 SUPABASE_URL = ("https://kglsjpchkzjdjvpticbl.supabase.co")
-SUPABASE_KEY =  ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtnbHNqcGNoa3pqZGp2cHRpY2JsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0MTkwNzQsImV4cCI6MjA5Mzk5NTA3NH0.lNPb2kybkVK9TzogbQOjdfMYhApL6JD3KRCyB_H-bWg"
-)
+SUPABASE_KEY = os.getenv ("SUPEBASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-import os
+import os    
 import requests
 from datetime import datetime
 from typing import Optional
@@ -747,7 +746,7 @@ def main():
     print("      OLLIE IS HERE 🔥       ")
     print("=" * 40)
 
-    username = input("\nOllie: hey! what's your name?\nyou: ").strip().lower()
+    username = "OLIVIER"  # For simplicity, using a fixed username. In a real app, you'd ask for this.
 
     # Get or create user
     user = db.get_or_create_user(username)
