@@ -13,8 +13,8 @@ load_dotenv()
 openai_client = os.getenv("OPENAI_API_KEY")    
 
 # Supabase client
-SUPABASE_URL = ("https://kglsjpchkzjdjvpticbl.supabase.co")
-SUPABASE_KEY = os.getenv ("SUPEBASE_KEY")
+SUPABASE_URL = os.getenv ("SUPABASE_URL")
+SUPABASE_KEY = os.getenv ("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 import os    
