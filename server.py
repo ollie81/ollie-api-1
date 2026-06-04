@@ -131,7 +131,7 @@ async def voice_chat(websocket: WebSocket, phone_number: str):
                 {"role": "system", "content": OLLIE_PERSONALITY},
                 {"role": "user", "content": greeting_prompt}
             ],
-            max_tokens=100
+            max_completion_tokens=100
         )
         greeting_text = opening.choices[0].message.content.strip()
 
