@@ -784,7 +784,7 @@ def detect_language(text: str) -> str:
                 {"role": "system", "content": "Return ONLY the language name in lowercase. Examples: english, french, kinyarwanda, swahili, arabic, spanish. Nothing else."},
                 {"role": "user", "content": text}
             ],
-            max_tokens=10
+            max_completion_tokens=10
         )
         return response.choices[0].message.content.strip().lower()
     except:
@@ -843,7 +843,7 @@ REMINDER THIS TURN:
         response = openai_client.chat.completions.create(
             model="gpt-5.4-mini",
             messages=messages,
-            max_tokens=150,
+            max_completion_tokens=150,
             temperature=0.9
         )
         return response.choices[0].message.content.strip()
@@ -907,7 +907,7 @@ def main():
             {"role": "system", "content": OLLIE_PERSONALITY},
             {"role": "user", "content": greeting_prompt}
         ],
-        max_tokens=100
+       max_completion_tokens=100
     )
     opening_message = opening.choices[0].message.content.strip()
     print(f"\nollie: {opening_message}")
