@@ -581,6 +581,20 @@ def speak_as_ollie(text: str, user_id: str = None, db=None):
         return None
 
 # ============================================================
+
+def detect_emotion_from_llm(text: str):
+    """Detect emotion using GPT-5.4-mini"""
+    response = openai_client.chat.completions.create(
+        model="gpt-5.4-mini",
+        messages=[
+            {"role": "system", "content": "Return only: sad, happy, angry, or neutral"},
+            {"role": "user", "content": text}
+        ],
+        max_completion_tokens=10
+    )
+    return response.choices[0].message.content
+
+# ============================================================
 # DATABASE CLASS
 # ============================================================
 
