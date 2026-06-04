@@ -11,7 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from openai import OpenAI
 
 # Import everything from your existing Ollie brain
-from ollie import (
+from app import (
     OllieDB,
     OLLIE_PERSONALITY,
     build_memory_context,
