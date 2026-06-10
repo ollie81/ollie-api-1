@@ -8,6 +8,8 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from openai import OpenAI
 
 # Import everything from your existing Ollie brain
@@ -32,6 +34,85 @@ from app import (
 load_dotenv()
 
 app = FastAPI()
+
+# Enable CORS for Flutter app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================
+# REQUEST MODEL FOR CHAT
+# ============================================================
+
+class ChatRequest(BaseModel):
+    username: str
+    message: str
+    history: list = []
+
+# ============================================================
+# REGULAR CHAT ENDPOINT (for text-only users)
+# ============================================================
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    """Regular HTTP endpoint for text chat"""
+    db = OllieDB(supabase)
+    
+    # Get or create user
+    user = db.get_or_create_user(username=request.username, phone=request.username)
+    user_id = user["id"]
+    
+    # Start session if not exists
+    session = db.start_session(user_id)
+    session_id = session["id"]
+    
+    # Check message limit
+    if not can_send_message(user_id):
+        return {"reply": "we've been talking a lot today 😄 come back tomorrow"}
+    
+    # Load memories for context
+    memories = db.get_relevant_memories(user_id)
+    context = db.get_user_context(user_id)
+    memory_block = build_memory_context(memories, context)
+    
+    # Detect language and emotion
+    language = detect_language(request.message)
+    emotion, emotion_score = detect_emotion_from_llm(request.message)
+    
+    # Save user message
+    db.save_message(user_id, session_id, request.message, "user", emotion_score)
+    increment_message_count(user_id)
+    
+    # Convert history to format expected by get_ollie_response
+    formatted_history = [{"role": msg.get("role", "user"), "content": msg.get("content", "")} for msg in request.history]
+    
+    # Get Ollie's response
+    reply = get_ollie_response(
+        request.message,
+        language,
+        formatted_history,
+        memory_block
+    )
+    
+    # Save Ollie's reply
+    db.save_message(user_id, session_id, reply, "ollie", 0.0)
+    
+    # Save memory if worth remembering
+    memory = extract_memory_worthy(request.message, reply)
+    if memory:
+        db.save_memory(user_id, memory, importance=2)
+    
+    # Update mood
+    db.update_mood(user_id, emotion)
+    
+    # End session
+    db.end_session(session_id, 2, 1)
+    
+    return {"reply": reply}
 
 # ============================================================
 # SPEECH TO TEXT
@@ -90,7 +171,7 @@ def generate_voice(text: str, user_id: str, db: OllieDB) -> bytes | None:
         return None
 
 # ============================================================
-# WEBSOCKET ENDPOINT
+# WEBSOCKET ENDPOINT (for voice chat)
 # ============================================================
 
 @app.websocket("/ollie/voice/{phone_number}")
