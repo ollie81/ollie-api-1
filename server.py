@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 
+
 # Import everything from your existing Ollie brain
 from app import (
     OllieDB,
