@@ -1009,5 +1009,10 @@ def main():
         # Update mood based on reply context
         current_mood = "neutral"
 
-if __name__ == "__main__":
-    main()
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"message": "Ollie is alive"}
