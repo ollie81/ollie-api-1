@@ -5,7 +5,16 @@ import os
 import requests
 from datetime import datetime, date
 
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def root():
+   return {"message": "Ollie is alive"}
+
 # Load all keys from .env file
+
 load_dotenv()
 
 # OpenAI client — FIXED: was just a string before
@@ -1009,10 +1018,3 @@ def main():
         # Update mood based on reply context
         current_mood = "neutral"
 
-from fastapi import FastAPI
-
-app = FastAPI()
-
-@app.get("/")
-def root():
-    return {"message": "Ollie is alive"}
