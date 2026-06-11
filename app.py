@@ -1,6 +1,6 @@
-#from openai import OpenAI
-#from supabase import create_client
-#from dotenv import load_dotenv
+from openai import OpenAI
+from supabase import create_client
+from dotenv import load_dotenv
 import os
 import requests
 from datetime import datetime, date
