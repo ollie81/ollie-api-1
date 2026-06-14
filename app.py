@@ -12,7 +12,180 @@ app = FastAPI()
 @app.get("/")
 def root():
    return {"message": "Ollie is alive"}
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+import hashlib
 
+# ============================================================
+# REQUEST MODELS
+# ============================================================
+
+class ChatRequest(BaseModel):
+    username: str
+    message: str
+    history: List[dict] = []
+
+class SpeakRequest(BaseModel):
+    username: str
+    message: str
+
+class AuthRequest(BaseModel):
+    phone_number: str
+    password: str
+
+class ForgotRequest(BaseModel):
+    phone_number: str
+
+class ResetRequest(BaseModel):
+    phone_number: str
+    otp: str
+    new_password: str
+
+# ============================================================
+# CHAT ROUTE
+# ============================================================
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    db = OllieDB(supabase)
+    
+    user = db.get_or_create_user(username=req.username, phone=req.username)
+    user_id = user["id"]
+    
+    if not can_send_message(user_id):
+        raise HTTPException(status_code=429, detail="Daily limit reached")
+    
+    session = db.start_session(user_id)
+    session_id = session["id"]
+    
+    language = detect_language(req.message)
+    memories = db.get_relevant_memories(user_id)
+    context = db.get_user_context(user_id)
+    memory_block = build_memory_context(memories, context)
+    
+    db.save_message(user_id, session_id, req.message, "user")
+    increment_message_count(user_id)
+    
+    reply = get_ollie_response(req.message, language, req.history, memory_block)
+    
+    db.save_message(user_id, session_id, reply, "ollie", 0.0)
+    
+    memory = extract_memory_worthy(req.message, reply)
+    if memory:
+        db.save_memory(user_id, memory, importance=2)
+    
+    return {"reply": reply, "language": language}
+
+# ============================================================
+# SPEAK ROUTE
+# ============================================================
+
+@app.post("/speak")
+def speak(req: SpeakRequest):
+    db = OllieDB(supabase)
+    user = db.get_or_create_user(username=req.username, phone=req.username)
+    user_id = user["id"]
+    
+    if not can_use_voice(user_id):
+        raise HTTPException(status_code=429, detail="Voice limit reached")
+    
+    if not PAPLA_API_KEY or not OLLIE_VOICE_ID:
+        raise HTTPException(status_code=500, detail="Voice not configured")
+    
+    try:
+        url = f"{PAPLA_TTS_URL}/{OLLIE_VOICE_ID}"
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {PAPLA_API_KEY}"
+        }
+        data = {
+            "text": req.message,
+            "model_id": "papla_p1",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+            }
+        }
+        response = requests.post(url, json=data, headers=headers)
+        if response.status_code == 200:
+            from fastapi.responses import Response
+            return Response(content=response.content, media_type="audio/mpeg")
+        else:
+            raise HTTPException(status_code=500, detail="Voice generation failed")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# AUTH ROUTES
+# ============================================================
+
+@app.post("/auth/signup")
+def signup(req: AuthRequest):
+    try:
+        hashed = hashlib.sha256(req.password.encode()).hexdigest()
+        existing = supabase.table("users").select("*").eq("phone", req.phone_number).execute()
+        if existing.data:
+            raise HTTPException(status_code=400, detail="User already exists")
+        result = supabase.table("users").insert({
+            "username": req.phone_number,
+            "phone": req.phone_number,
+            "password_hash": hashed,
+            "country": "RW"
+        }).execute()
+        return {"success": True, "user": result.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auth/login")
+def login(req: AuthRequest):
+    try:
+        hashed = hashlib.sha256(req.password.encode()).hexdigest()
+        result = supabase.table("users").select("*").eq("phone", req.phone_number).eq("password_hash", hashed).execute()
+        if not result.data:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        return {"success": True, "user": result.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/auth/check/{phone_number}")
+def check_user(phone_number: str):
+    result = supabase.table("users").select("*").eq("phone", phone_number).execute()
+    return {"exists": len(result.data) > 0}
+
+@app.post("/auth/forgot")
+def forgot_password(req: ForgotRequest):
+    import random
+    otp = str(random.randint(100000, 999999))
+    supabase.table("users").update({"otp": otp}).eq("phone", req.phone_number).execute()
+    return {"success": True, "otp": otp}
+
+@app.post("/auth/reset")
+def reset_password(req: ResetRequest):
+    result = supabase.table("users").select("*").eq("phone", req.phone_number).eq("otp", req.otp).execute()
+    if not result.data:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+    hashed = hashlib.sha256(req.new_password.encode()).hexdigest()
+    supabase.table("users").update({"password_hash": hashed, "otp": None}).eq("phone", req.phone_number).execute()
+    return {"success": True}
+
+# ============================================================
+# PREMIUM ROUTES
+# ============================================================
+
+@app.get("/premium/status/{phone_number}")
+def premium_status(phone_number: str):
+    result = supabase.table("subscriptions").select("*").eq("user_id", phone_number).eq("status", "active").execute()
+    return {"is_premium": len(result.data) > 0}
+
+@app.post("/premium/activate")
+def activate_premium(data: dict):
+    return {"success": True, "message": "Premium activated"}
 # Load all keys from .env file
 
 load_dotenv()
