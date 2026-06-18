@@ -1168,7 +1168,7 @@ def login(req: AuthRequest, request: Request):
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(status_code=500, detail="Login failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/refresh")
 def refresh_token(req: RefreshRequest):
