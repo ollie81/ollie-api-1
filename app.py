@@ -1133,7 +1133,7 @@ def signup(req: AuthRequest, request: Request):
         }
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/login")
@@ -1167,7 +1167,7 @@ def login(req: AuthRequest, request: Request):
         }
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/refresh")
