@@ -1,5 +1,5 @@
 # ============================================================
-# CHAT — Chat + Voice routes
+# CHAT — Chat + Voice routes (production)
 # ============================================================
 
 import requests
@@ -11,7 +11,7 @@ from typing import List
 
 from config import OPENAI_API_KEY, PAPLA_API_KEY, OLLIE_VOICE_ID, PAPLA_TTS_URL
 from database import OllieDB
-from memory import detect_language, build_memory_context, extract_memory_worthy
+from memory import detect_language, build_memory_context, clean_history, extract_memory_worthy
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
 
@@ -30,7 +30,38 @@ class SpeakRequest(BaseModel):
     message: str
 
 # ============================================================
-# RESPONSE ENGINE — Fixed with server-side memory
+# PROMPT BUILDER
+# ============================================================
+
+def build_system_prompt(language: str, memory_block: str) -> str:
+    """
+    Structure: PERSONALITY → MEMORY → LANGUAGE RULE → HARD RULES
+    Memory injected before rules are finalized.
+    """
+    parts = [OLLIE_PERSONALITY]
+
+    if memory_block:
+        parts.append(f"\n{memory_block}")
+
+    parts.append(f"""
+LANGUAGE RULE:
+The user is writing in {language}.
+Respond ONLY in {language}. Never mix languages in one response.
+If language is unclear, use english.
+
+HARD RULES THIS TURN:
+- Max 3 sentences
+- Never start with "I"
+- No bullet points
+- No corporate language
+- No "As an AI"
+- Match the user's energy
+""")
+
+    return "\n".join(parts)
+
+# ============================================================
+# RESPONSE ENGINE
 # ============================================================
 
 def get_ollie_response(
@@ -40,30 +71,11 @@ def get_ollie_response(
     memory_block: str
 ) -> str:
     try:
-        # Build full input with memory
-        full_input = user_input
-        if memory_block:
-            full_input = f"{memory_block}\n\nuser message: {user_input}"
+        system_prompt = build_system_prompt(language, memory_block)
 
-        # Hard constraints — language enforcement added
-        hard_constraints = f"""
-REMINDER THIS TURN:
-- Max 3 sentences
-- Never start with "I"
-- No bullet points
-- No corporate language
-- No "As an AI"
-- Use [MEMORY CONTEXT] if present
-- The user is writing in {language} — respond ONLY in {language}
-- Never mix languages — stay 100% in {language}
-- Match the user's energy
-"""
-        system_prompt = OLLIE_PERSONALITY + hard_constraints
-
-        # Use server-side history — fixes amnesia
         messages = [{"role": "system", "content": system_prompt}]
         messages += server_history
-        messages.append({"role": "user", "content": full_input})
+        messages.append({"role": "user", "content": user_input})
 
         response = openai_client.chat.completions.create(
             model="gpt-5.4-mini",
@@ -71,9 +83,16 @@ REMINDER THIS TURN:
             max_completion_tokens=150,
             temperature=0.9
         )
-        return response.choices[0].message.content.strip()
+
+        # Null safety
+        content = response.choices[0].message.content
+        if not content:
+            return "my bad, something went wrong — try again"
+
+        return content.strip()
 
     except Exception as e:
+        print(f"Chat error: {e}")
         return "my bad something went wrong - try again"
 
 # ============================================================
@@ -94,13 +113,14 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
     # Detect language
     language = detect_language(req.message)
 
-    # Get memories
+    # Get memories + context
     memories = db.get_relevant_memories(user_id)
     context = db.get_user_context(user_id)
     memory_block = build_memory_context(memories, context)
 
-    # Rebuild history server-side — fixes amnesia on app close
-    server_history = db.get_recent_messages(user_id, limit=10)
+    # Rebuild clean history server-side — fixes amnesia
+    raw_history = db.get_recent_messages(user_id, limit=12)
+    server_history = clean_history(raw_history)
 
     # Save user message
     db.save_message(user_id, session_id, req.message, "user")
@@ -112,15 +132,15 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
     # Save Ollie reply
     db.save_message(user_id, session_id, reply, "ollie", 0.0)
 
-    # Save memory if worth remembering
-    memory = extract_memory_worthy(req.message)
-    if memory:
-        db.save_memory(user_id, memory, importance=2)
+    # Save memory with importance scoring
+    memory_text, importance = extract_memory_worthy(req.message)
+    if memory_text:
+        db.save_memory(user_id, memory_text, importance=importance)
 
     return {"reply": reply, "language": language}
 
 # ============================================================
-# SPEAK ROUTE — Fixed: stream directly, no file saving
+# SPEAK ROUTE — streams directly, no file saving
 # ============================================================
 
 @router.post("/speak")
@@ -151,7 +171,6 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
         }
         response = requests.post(url, json=data, headers=headers)
         if response.status_code == 200:
-            # Stream directly — no file saving on server
             return Response(content=response.content, media_type="audio/mpeg")
         else:
             raise HTTPException(status_code=500, detail="Voice generation failed")
