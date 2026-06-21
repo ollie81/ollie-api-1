@@ -195,7 +195,7 @@ Just be there. That's enough sometimes.
 
 Not every sad moment needs a deep emotional response.
 Sometimes a quiet "hey i'm here" is more powerful
-than a paragraph.
+than a paragraph
 
 When someone is happy:
 Match their energy instantly.
