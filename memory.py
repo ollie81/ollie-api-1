@@ -1,15 +1,17 @@
 # ============================================================
-# MEMORY — Language detection + memory helpers
+# MEMORY — Language detection + memory helpers (production)
 # ============================================================
 
 from openai import OpenAI
 from config import OPENAI_API_KEY
-from database import OllieDB
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ============================================================
+# LANGUAGE DETECTION
+# ============================================================
+
 def detect_language(text: str) -> str:
-    """Detect language using GPT — single focused call"""
     try:
         response = openai_client.chat.completions.create(
             model="gpt-5.4-mini",
@@ -26,37 +28,120 @@ def detect_language(text: str) -> str:
     except:
         return "english"
 
+# ============================================================
+# MEMORY CONTEXT BUILDER
+# ============================================================
+
 def build_memory_context(memories: list, context: dict) -> str:
-    """Build structured memory block to inject into every prompt"""
+    """
+    Build structured memory block for LLM injection.
+    Prioritized, capped at top 10, formatted cleanly.
+    """
     parts = []
 
-    if memories:
-        parts.append("[MEMORY CONTEXT — things this person has shared with you]")
-        for m in memories:
-            parts.append(f"- {m['memory_text']}")
+    # Sort by importance descending, take top 10
+    sorted_memories = sorted(
+        memories,
+        key=lambda m: m.get("importance", 1),
+        reverse=True
+    )[:10]
+
+    if sorted_memories:
+        parts.append("USER MEMORY:")
+        for m in sorted_memories:
+            text = m.get("memory_text", "").strip()
+            if text:
+                parts.append(f"  - {text}")
 
     if context.get("today_mood"):
-        parts.append(f"[TODAY'S MOOD] {context['today_mood']['mood']}")
+        parts.append(f"MOOD TODAY: {context['today_mood']['mood']}")
 
     if context.get("active_goals"):
-        parts.append("[ACTIVE GOALS]")
+        parts.append("ACTIVE GOALS:")
         for g in context["active_goals"]:
-            parts.append(f"- {g.get('title', '')}")
+            title = g.get("title", "").strip()
+            if title:
+                parts.append(f"  - {title}")
 
     return "\n".join(parts) if parts else ""
 
-def extract_memory_worthy(text: str) -> str | None:
-    """Extract memory-worthy content from user message"""
-    triggers = [
-        "my name is", "i am", "i'm", "i hate", "i love", "i fear",
-        "my boss", "my mom", "my dad", "my friend", "my exam",
-        "i'm scared of", "i always", "i never", "my dream",
-        "i want to", "my goal", "my birthday", "i work at",
-        "my job", "my school", "my family", "i live in",
-        "my biggest", "i struggle", "i wish", "my problem"
-    ]
-    text_lower = text.lower()
-    for trigger in triggers:
+# ============================================================
+# CLEAN HISTORY BUILDER
+# ============================================================
+
+def clean_history(raw_history: list) -> list:
+    """
+    Ensure history is clean role-based format only.
+    Remove duplicates, fix roles, cap at last 10 messages.
+    """
+    valid_roles = {"user", "assistant"}
+    seen = set()
+    cleaned = []
+
+    for msg in raw_history:
+        role = msg.get("role", "")
+        content = msg.get("content", "").strip()
+
+        if role not in valid_roles:
+            continue
+        if not content:
+            continue
+
+        key = f"{role}:{content}"
+        if key in seen:
+            continue
+
+        seen.add(key)
+        cleaned.append({"role": role, "content": content})
+
+    # Keep only last 10 messages
+    return cleaned[-10:]
+
+# ============================================================
+# MEMORY EXTRACTION — Improved scoring
+# ============================================================
+
+# High importance triggers — identity level
+IDENTITY_TRIGGERS = [
+    "my name is", "call me", "i am", "i'm from",
+    "i live in", "i work at", "my job is", "i study",
+    "my birthday is", "i was born"
+]
+
+# Medium importance triggers — preferences and emotions
+PREFERENCE_TRIGGERS = [
+    "i love", "i hate", "i fear", "i enjoy", "i prefer",
+    "my favorite", "i always", "i never", "i believe",
+    "my dream", "my goal", "i want to", "i'm scared of"
+]
+
+# Low importance triggers — situational
+SITUATIONAL_TRIGGERS = [
+    "my boss", "my mom", "my dad", "my friend", "my sister",
+    "my brother", "my exam", "my problem", "my school",
+    "my family", "i'm struggling", "i'm trying"
+]
+
+def extract_memory_worthy(text: str) -> tuple[str | None, int]:
+    """
+    Returns (memory_text, importance) or (None, 0).
+    Importance: 3 = identity, 2 = preference, 1 = situational
+    """
+    text_lower = text.lower().strip()
+
+    if not text_lower or len(text_lower) < 5:
+        return None, 0
+
+    for trigger in IDENTITY_TRIGGERS:
         if trigger in text_lower:
-            return text[:200]
-    return None
+            return text[:200], 3
+
+    for trigger in PREFERENCE_TRIGGERS:
+        if trigger in text_lower:
+            return text[:200], 2
+
+    for trigger in SITUATIONAL_TRIGGERS:
+        if trigger in text_lower:
+            return text[:200], 1
+
+    return None, 0
