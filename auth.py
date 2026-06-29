@@ -8,6 +8,8 @@ import random
 import bcrypt
 import jwt
 
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -252,3 +254,49 @@ def reset_password(req: ResetRequest):
 
     supabase.table("refresh_tokens").delete().eq("user_id", user["id"]).execute()
     return {"success": True}
+
+class GoogleAuthRequest(BaseModel):
+    id_token: str
+
+@router.post("/google")
+def google_login(req: GoogleAuthRequest):
+    try:
+        info = id_token.verify_oauth2_token(
+            req.id_token,
+            google_requests.Request(),
+            "762080204480-pi9vflsb9klhgcggkjcuid214uhaa45q.apps.googleusercontent.com"
+        )
+        email = info["email"]
+        name = info.get("name", email)
+
+        existing = supabase.table("users").select("*").eq("phone", email).execute()
+        if existing.data:
+            user = existing.data[0]
+        else:
+            result = supabase.table("users").insert({
+                "username": name,
+                "phone": email,
+                "password_hash": "",
+                "country": "RW"
+            }).execute()
+            user = result.data[0]
+
+        user_id = user["id"]
+        access_token = create_access_token(user_id)
+        refresh_token = create_refresh_token()
+        hashed_refresh = hash_refresh_token(refresh_token)
+
+        supabase.table("refresh_tokens").insert({
+            "user_id": user_id,
+            "token_hash": hashed_refresh,
+            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+        }).execute()
+
+        return {
+            "success": True,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
