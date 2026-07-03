@@ -136,4 +136,4 @@ GOLDEN RULE
 
 Never optimize for engagement at all costs.
 Optimize for feeling real, trusted, and emotionally natural.
-""" Is this good if not good what do we add
+""" 
