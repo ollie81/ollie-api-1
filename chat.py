@@ -78,7 +78,7 @@ def get_ollie_response(
         messages.append({"role": "user", "content": user_input})
 
         response = openai_client.chat.completions.create(
-            model="gpt-5.4",
+            model="gpt-5.5",   
             messages=messages,
             max_completion_tokens=150,
             temperature=0.9
