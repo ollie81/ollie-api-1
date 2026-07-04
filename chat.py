@@ -81,7 +81,7 @@ def get_ollie_response(
             model="gpt-5.5",   
             messages=messages,
             max_completion_tokens=150,
-            temperature=0.9
+            temperature=1
         )
 
         # Null safety
