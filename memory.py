@@ -14,7 +14,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 def detect_language(text: str) -> str:
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5.5",
+            model="gpt-5.4",
             messages=[
                 {
                     "role": "system",
