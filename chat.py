@@ -19,6 +19,7 @@ from memory import (
     clean_history,
     extract_memory_worthy,
     pick_chat_model,
+    FLAGSHIP_MODEL,
 )
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
@@ -98,13 +99,23 @@ def get_ollie_response(
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            response = openai_client.chat.completions.create(
+            request_kwargs = dict(
                 model=model,
                 messages=messages,
-                max_completion_tokens=150,
+                max_completion_tokens=400,
                 temperature=1,
                 timeout=20,
             )
+
+            # gpt-5.5 is a reasoning model — hidden reasoning tokens
+            # count against max_completion_tokens and can silently eat
+            # the whole budget, leaving an empty visible reply. Keep
+            # reasoning effort minimal since Ollie's replies are short
+            # and conversational, not multi-step problems.
+            if model == FLAGSHIP_MODEL:
+                request_kwargs["reasoning_effort"] = "minimal"
+
+            response = openai_client.chat.completions.create(**request_kwargs)
 
             content = response.choices[0].message.content
             if not content or not content.strip():
