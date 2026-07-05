@@ -113,7 +113,7 @@ def get_ollie_response(
             # reasoning effort minimal since Ollie's replies are short
             # and conversational, not multi-step problems.
             if model == FLAGSHIP_MODEL:
-                request_kwargs["reasoning_effort"] = "minimal"
+                request_kwargs["reasoning_effort"] = "low"
 
             response = openai_client.chat.completions.create(**request_kwargs)
 
