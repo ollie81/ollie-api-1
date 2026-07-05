@@ -1,7 +1,6 @@
 # ============================================================
 # AUTH — All authentication routes
 # ============================================================
-
 import hashlib
 import secrets
 import random
@@ -49,6 +48,9 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str
+
+class FCMTokenRequest(BaseModel):
+    fcm_token: str
 
 # ============================================================
 # JWT HELPERS
@@ -255,6 +257,10 @@ def reset_password(req: ResetRequest):
     supabase.table("refresh_tokens").delete().eq("user_id", user["id"]).execute()
     return {"success": True}
 
+# ============================================================
+# GOOGLE LOGIN
+# ============================================================
+
 class GoogleAuthRequest(BaseModel):
     id_token: str
 
@@ -300,3 +306,20 @@ def google_login(req: GoogleAuthRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+# ============================================================
+# FCM TOKEN - ADD THIS
+# ============================================================
+
+@router.post("/fcm-token")
+def save_fcm_token(
+    req: FCMTokenRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    try:
+        supabase.table("users").update({
+            "fcm_token": req.fcm_token
+        }).eq("id", current_user["id"]).execute()
+        return {"success": True, "message": "FCM token saved"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
