@@ -1,8 +1,7 @@
-# CHAT — Chat + Voice routes (production)
-# ============================================================
-
 import logging
 import time
+import re
+from datetime import datetime, timedelta
 
 import requests
 from openai import OpenAI
@@ -23,6 +22,7 @@ from memory import (
 )
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
+from notification_service import NotificationService  # ✅ ADD THIS
 
 logger = logging.getLogger("ollie.chat")
 
@@ -137,6 +137,22 @@ def get_ollie_response(
     return "my bad something went wrong - try again"
 
 # ============================================================
+# EVENT DETECTION
+# ============================================================
+
+def detect_future_events(text: str) -> bool:
+    """Detect if user mentions future appointments/events"""
+    date_patterns = [
+        r"(tomorrow|next \w+|in \d+ days)",
+        r"(hospital|doctor|clinic|appointment|meeting|surgery)"
+    ]
+    
+    has_date = any(re.search(p, text.lower()) for p in date_patterns)
+    has_event = re.search(r"(hospital|doctor|clinic|appointment|meeting)", text.lower())
+    
+    return has_date and has_event is not None
+
+# ============================================================
 # CHAT ROUTE
 # ============================================================
 
@@ -187,6 +203,14 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         memory_text, importance = extract_memory_worthy(req.message)
         if memory_text:
             db.save_memory(user_id, memory_text, importance=importance)
+
+        # ✅ DETECT EVENTS AND SCHEDULE NOTIFICATION
+        if detect_future_events(req.message):
+            NotificationService.create_notification(
+                user_id=user_id,
+                title="Ollie Reminder",
+                body="How did your appointment go?",
+            )
 
         return {"reply": reply, "language": language, "model_used": model}
 
