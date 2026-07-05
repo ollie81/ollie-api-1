@@ -13,7 +13,9 @@ from auth import router as auth_router
 from chat import router as chat_router
 from premium import router as premium_router
 from notifications import router as notifications_router  # ✅ ADD THIS
+from notification_service import scheduler  # add if using scheduler
 
+app.include_router(notifications_router, prefix="/notifications")  # add
 # ============================================================
 # APP SETUP
 # ============================================================
