@@ -1,3 +1,5 @@
+
+# ============================================================
 # MEMORY — Language detection + memory helpers (production)
 # ============================================================
 
@@ -49,16 +51,21 @@ def detect_language(text: str, max_retries: int = 2) -> str:
                     {
                         "role": "system",
                         "content": (
-                            "Return ONLY the language name in lowercase. "
-                            "One word only. Examples: english, french, "
-                            "kinyarwanda, swahili, arabic, spanish, korean, "
-                            "chinese, russian. Nothing else."
+                            "Identify the language the person INTENDS to "
+                            "write in, even if there are typos, missing "
+                            "accents, or phonetic/misspelled words — go "
+                            "by the closest real language, not literal "
+                            "spelling. Return ONLY the language name in "
+                            "lowercase, one word. Examples: english, "
+                            "french, kinyarwanda, swahili, arabic, "
+                            "spanish, korean, chinese, russian. "
+                            "Nothing else."
                         )
                     },
                     {"role": "user", "content": text}
                 ],
                 max_completion_tokens=40,
-                reasoning_effort="low",
+                reasoning_effort="minimal",
                 timeout=10,
             )
             content = response.choices[0].message.content
@@ -370,3 +377,4 @@ def extract_memory_worthy(text: str) -> tuple[str | None, int]:
     except Exception as e:
         logger.warning(f"extract_memory_worthy failed, skipping: {e}")
         return None, 0
+
