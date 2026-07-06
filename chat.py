@@ -1,6 +1,5 @@
 import logging
 import time
-import re
 from datetime import datetime, timedelta
 
 import requests
@@ -22,7 +21,7 @@ from memory import (
 )
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
-from notification_service import NotificationService  # ✅ ADD THIS
+from event_scheduler import maybe_schedule_event
 
 logger = logging.getLogger("ollie.chat")
 
@@ -137,22 +136,6 @@ def get_ollie_response(
     return "my bad something went wrong - try again"
 
 # ============================================================
-# EVENT DETECTION
-# ============================================================
-
-def detect_future_events(text: str) -> bool:
-    """Detect if user mentions future appointments/events"""
-    date_patterns = [
-        r"(tomorrow|next \w+|in \d+ days)",
-        r"(hospital|doctor|clinic|appointment|meeting|surgery)"
-    ]
-    
-    has_date = any(re.search(p, text.lower()) for p in date_patterns)
-    has_event = re.search(r"(hospital|doctor|clinic|appointment|meeting)", text.lower())
-    
-    return has_date and has_event is not None
-
-# ============================================================
 # CHAT ROUTE
 # ============================================================
 
@@ -204,13 +187,13 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         if memory_text:
             db.save_memory(user_id, memory_text, importance=importance)
 
-        # ✅ DETECT EVENTS AND SCHEDULE NOTIFICATION
-        if detect_future_events(req.message):
-            NotificationService.create_notification(
-                user_id=user_id,
-                title="Ollie Reminder",
-                body="How did your appointment go?",
-            )
+        # Check if this message describes a meaningful future event
+        # (interview, exam, first date, deadline, family event —
+        # anything, not just medical) worth a genuine check-in later.
+        # This only SCHEDULES a future notification — it does not send
+        # one now. Only runs on already-important, non-crisis messages,
+        # so it doesn't fire on every mention of a date/time.
+        maybe_schedule_event(user_id, req.message, importance)
 
         return {"reply": reply, "language": language, "model_used": model}
 
