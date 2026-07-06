@@ -2,6 +2,8 @@
 # ============================================================
 # MEMORY — Language detection + memory helpers (production)
 # ============================================================
+# MEMORY — Language detection + memory helpers (production)
+# ============================================================
 
 import logging
 import time
@@ -64,8 +66,8 @@ def detect_language(text: str, max_retries: int = 2) -> str:
                     },
                     {"role": "user", "content": text}
                 ],
-                max_completion_tokens=40,
-                reasoning_effort="minimal",
+                max_completion_tokens=80,
+                reasoning_effort="none",
                 timeout=10,
             )
             content = response.choices[0].message.content
