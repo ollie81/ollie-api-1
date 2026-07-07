@@ -6,6 +6,8 @@ import secrets
 import random
 import bcrypt
 import jwt
+import os
+from twilio.rest import Client
 
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -26,6 +28,16 @@ from database import supabase
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 security = HTTPBearer()
+
+# ============================================================
+# TWILIO CONFIG
+# ============================================================
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_VERIFY_SERVICE_SID = os.getenv("TWILIO_VERIFY_SERVICE_SID")
+
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # ============================================================
 # REQUEST MODELS
@@ -221,41 +233,72 @@ def check_user(phone_number: str):
     result = supabase.table("users").select("id").eq("phone", phone_number).execute()
     return {"exists": len(result.data) > 0}
 
+# ============================================================
+# FORGOT PASSWORD - TWILIO SMS
+# ============================================================
+
 @router.post("/forgot")
 @limiter.limit("3/minute")
 def forgot_password(req: ForgotRequest, request: Request):
-    otp = str(random.randint(100000, 999999))
-    otp_expires = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-    supabase.table("users").update({
-        "otp": otp,
-        "otp_expires_at": otp_expires
-    }).eq("phone", req.phone_number).execute()
-    return {"success": True, "otp": otp}
+    try:
+        # Check if user exists
+        result = supabase.table("users").select("id").eq("phone", req.phone_number).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Send OTP via Twilio Verify
+        verification = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+            .verifications \
+            .create(to=req.phone_number, channel='sms')
+
+        # Store verification SID in Supabase
+        supabase.table("users").update({
+            "otp_sid": verification.sid,
+            "otp_expires_at": (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+        }).eq("phone", req.phone_number).execute()
+
+        return {"success": True, "message": "OTP sent via SMS"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================
+# RESET PASSWORD - TWILIO VERIFY
+# ============================================================
 
 @router.post("/reset")
 def reset_password(req: ResetRequest):
-    result = supabase.table("users").select("*") \
-        .eq("phone", req.phone_number) \
-        .eq("otp", req.otp) \
-        .execute()
-    if not result.data:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
+    try:
+        # Verify OTP with Twilio
+        verification_check = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+            .verification_checks \
+            .create(to=req.phone_number, code=req.otp)
 
-    user = result.data[0]
-    otp_expires = user.get("otp_expires_at")
-    if otp_expires:
-        if datetime.utcnow() > datetime.fromisoformat(otp_expires):
-            raise HTTPException(status_code=400, detail="OTP expired")
+        if verification_check.status != "approved":
+            raise HTTPException(status_code=400, detail="Invalid OTP")
 
-    hashed = hash_password(req.new_password)
-    supabase.table("users").update({
-        "password_hash": hashed,
-        "otp": None,
-        "otp_expires_at": None
-    }).eq("phone", req.phone_number).execute()
+        # Get user
+        result = supabase.table("users").select("*").eq("phone", req.phone_number).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    supabase.table("refresh_tokens").delete().eq("user_id", user["id"]).execute()
-    return {"success": True}
+        user = result.data[0]
+
+        # Update password
+        hashed = hash_password(req.new_password)
+        supabase.table("users").update({
+            "password_hash": hashed,
+            "otp_sid": None,
+            "otp_expires_at": None
+        }).eq("phone", req.phone_number).execute()
+
+        # Delete all refresh tokens for this user
+        supabase.table("refresh_tokens").delete().eq("user_id", user["id"]).execute()
+
+        return {"success": True, "message": "Password reset successful"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
 # GOOGLE LOGIN
@@ -308,7 +351,7 @@ def google_login(req: GoogleAuthRequest):
         raise HTTPException(status_code=401, detail=str(e))
 
 # ============================================================
-# FCM TOKEN - ADD THIS
+# FCM TOKEN
 # ============================================================
 
 @router.post("/fcm-token")
@@ -323,3 +366,4 @@ def save_fcm_token(
         return {"success": True, "message": "FCM token saved"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
