@@ -36,6 +36,7 @@ security = HTTPBearer()
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_VERIFY_SERVICE_SID = os.getenv("TWILIO_VERIFY_SERVICE_SID")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")  # ← ADDED
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
@@ -110,6 +111,22 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
+
+# ============================================================
+# TWILIO HELPERS
+# ============================================================
+
+def send_direct_sms(to: str, body: str):
+    """Send SMS directly using Twilio phone number (fallback)"""
+    try:
+        message = twilio_client.messages.create(
+            body=body,
+            from_=TWILIO_PHONE_NUMBER,
+            to=to
+        )
+        return {"success": True, "sid": message.sid}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 # ============================================================
 # AUTH ROUTES
@@ -234,7 +251,7 @@ def check_user(phone_number: str):
     return {"exists": len(result.data) > 0}
 
 # ============================================================
-# FORGOT PASSWORD - TWILIO SMS
+# FORGOT PASSWORD - TWILIO VERIFY API
 # ============================================================
 
 @router.post("/forgot")
@@ -262,7 +279,7 @@ def forgot_password(req: ForgotRequest, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
-# RESET PASSWORD - TWILIO VERIFY
+# RESET PASSWORD - TWILIO VERIFY API
 # ============================================================
 
 @router.post("/reset")
