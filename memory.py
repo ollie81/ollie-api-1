@@ -1,7 +1,6 @@
 
 # ============================================================
 # MEMORY — Language detection + memory helpers (production)
-# ============================================================
 # MEMORY — Language detection + memory helpers (production)
 # ============================================================
 
@@ -379,4 +378,3 @@ def extract_memory_worthy(text: str) -> tuple[str | None, int]:
     except Exception as e:
         logger.warning(f"extract_memory_worthy failed, skipping: {e}")
         return None, 0
-
