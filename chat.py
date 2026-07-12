@@ -22,6 +22,7 @@ from memory import (
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
 from event_scheduler import maybe_schedule_event
+from interest_memory import maybe_track_interest, build_interest_context
 
 logger = logging.getLogger("ollie.chat")
 
@@ -166,18 +167,25 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         raw_history = db.get_recent_messages(user_id, limit=12)
         server_history = clean_history(raw_history)
 
-        # Decide which model handles this turn — uncommon language,
-        # high emotional intensity, or active memory context all
-        # route to the flagship; routine common-language small talk
-        # with no memory in play goes to the fast/cheap model.
+        # Decide which model handles this turn — based on the
+        # original memory block only (facts/mood/goals). Interests
+        # are deliberately excluded from this decision, since they
+        # populate quickly for active users and would otherwise push
+        # almost every message onto the flagship model.
         model = pick_chat_model(language, req.message, memory_block)
+
+        # Interest memory — separate, additive system. Added to the
+        # PROMPT CONTEXT only, after routing is already decided, so
+        # it enriches Ollie's replies without affecting cost/routing.
+        interest_block = build_interest_context(user_id)
+        prompt_context = f"{memory_block}\n{interest_block}" if interest_block else memory_block
 
         # Save user message
         db.save_message(user_id, session_id, req.message, "user")
         db.increment_message_count(user_id)
 
         # Get response
-        reply = get_ollie_response(req.message, language, server_history, memory_block, model)
+        reply = get_ollie_response(req.message, language, server_history, prompt_context, model)
 
         # Save Ollie reply
         db.save_message(user_id, session_id, reply, "ollie", 0.0)
@@ -194,6 +202,10 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         # one now. Only runs on already-important, non-crisis messages,
         # so it doesn't fire on every mention of a date/time.
         maybe_schedule_event(user_id, req.message, importance)
+
+        # Track ongoing interests/hobbies mentioned — separate,
+        # additive system. Failure here never breaks the reply.
+        maybe_track_interest(user_id, req.message)
 
         return {"reply": reply, "language": language, "model_used": model}
 
