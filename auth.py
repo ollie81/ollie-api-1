@@ -1,4 +1,3 @@
-# ============================================================
 # AUTH — All authentication routes
 # ============================================================
 import hashlib
@@ -36,7 +35,7 @@ security = HTTPBearer()
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_VERIFY_SERVICE_SID = os.getenv("TWILIO_VERIFY_SERVICE_SID")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")  # ← ADDED
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
@@ -47,6 +46,14 @@ twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 class AuthRequest(BaseModel):
     phone_number: str
     password: str
+
+class SignupOtpRequest(BaseModel):
+    phone_number: str
+
+class SignupRequest(BaseModel):
+    phone_number: str
+    password: str
+    otp: str
 
 class ForgotRequest(BaseModel):
     phone_number: str
@@ -132,13 +139,51 @@ def send_direct_sms(to: str, body: str):
 # AUTH ROUTES
 # ============================================================
 
-@router.post("/signup")
+@router.post("/signup/request-otp")
 @limiter.limit("5/minute")
-def signup(req: AuthRequest, request: Request):
+def request_signup_otp(req: SignupOtpRequest, request: Request):
+    """
+    Step 1 of signup: verify the phone number is real and not
+    already registered, then send an OTP via Twilio Verify.
+    The account itself is NOT created here — only after the OTP
+    is confirmed in /signup below. This is what actually stops
+    someone signing up with a phone number they don't own.
+    """
     try:
         existing = supabase.table("users").select("id").eq("phone", req.phone_number).execute()
         if existing.data:
             raise HTTPException(status_code=400, detail="User already exists")
+
+        twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+            .verifications \
+            .create(to=req.phone_number, channel='sms')
+
+        return {"success": True, "message": "OTP sent via SMS"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/signup")
+@limiter.limit("5/minute")
+def signup(req: SignupRequest, request: Request):
+    """
+    Step 2 of signup: verifies the OTP sent in step 1 before
+    creating the account. A signup can no longer succeed without
+    proving ownership of the phone number.
+    """
+    try:
+        existing = supabase.table("users").select("id").eq("phone", req.phone_number).execute()
+        if existing.data:
+            raise HTTPException(status_code=400, detail="User already exists")
+
+        verification_check = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
+            .verification_checks \
+            .create(to=req.phone_number, code=req.otp)
+
+        if verification_check.status != "approved":
+            raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
         hashed = hash_password(req.password)
         result = supabase.table("users").insert({
@@ -383,4 +428,3 @@ def save_fcm_token(
         return {"success": True, "message": "FCM token saved"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
