@@ -16,7 +16,7 @@ from chat import router as chat_router
 from premium import router as premium_router
 from notifications import router as notifications_router
 from event_scheduler import run_due_notifications
-
+from settings import router as settings_router
 # ============================================================
 # SCHEDULER — checks for due event check-ins periodically
 # ============================================================
@@ -54,7 +54,7 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(chat_router)
 app.include_router(premium_router, prefix="/premium")
 app.include_router(notifications_router, prefix="/notifications")
-
+app.include_router(settings_router, prefix="/settings")
 
 @app.get("/")
 def root():
