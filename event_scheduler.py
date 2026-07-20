@@ -258,3 +258,85 @@ def run_due_notifications() -> None:
 
     except Exception as e:
         logger.error(f"run_due_notifications: query failed: {e}")
+
+
+# ============================================================
+# EXPLICIT REMINDERS — "remind me to X" / "don't let me forget"
+# Separate from the passive check-in detector above: this does
+# NOT require importance >= 2, and has no 1-hour minimum delay.
+# ============================================================
+
+def detect_explicit_reminder(text: str) -> dict | None:
+    if not text or not text.strip():
+        return None
+
+    now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"Current UTC time: {now_utc}. Decide if the user "
+                        "is explicitly asking to be reminded of something "
+                        "(\"remind me to...\", \"don't let me forget...\", "
+                        "\"set a reminder for...\"). If so, work out how "
+                        "many minutes from now the reminder should fire, "
+                        "based on whatever time they gave (relative like "
+                        "\"in 20 minutes\", or a clock time like \"at 5pm\" "
+                        "— compute minutes until that next occurs).\n\n"
+                        "Reply with ONLY JSON, no other text:\n"
+                        '{"is_reminder": true or false, '
+                        '"reminder_text": "short description, or empty string", '
+                        '"minutes_until": integer}'
+                    )
+                },
+                {"role": "user", "content": text}
+            ],
+            max_completion_tokens=100,
+            temperature=0,
+            timeout=10,
+        )
+        content = response.choices[0].message.content
+        if not content:
+            return None
+        data = json.loads(content.strip())
+        if not data.get("is_reminder"):
+            return None
+        reminder_text = (data.get("reminder_text") or "").strip()
+        minutes = data.get("minutes_until")
+        if not reminder_text or not isinstance(minutes, (int, float)):
+            return None
+        minutes = max(1, min(int(minutes), MAX_HOURS * 60))
+        return {"reminder_text": reminder_text, "minutes_until": minutes}
+    except Exception as e:
+        logger.warning(f"detect_explicit_reminder failed, skipping: {e}")
+        return None
+
+
+def maybe_schedule_reminder(user_id: str, message: str) -> None:
+    try:
+        reminder = detect_explicit_reminder(message)
+        if not reminder:
+            return
+
+        scheduled_for = (
+            datetime.utcnow() + timedelta(minutes=reminder["minutes_until"])
+        ).isoformat()
+
+        supabase.table("scheduled_events").insert({
+            "user_id": user_id,
+            "event_summary": reminder["reminder_text"],
+            "topic_key": _topic_key(user_id, f"reminder:{reminder['reminder_text']}:{scheduled_for}"),
+            "scheduled_for": scheduled_for,
+            "status": "pending",
+            "kind": "reminder",
+            "created_at": datetime.utcnow().isoformat(),
+        }).execute()
+
+        logger.info(f"scheduled explicit reminder for user {user_id} at {scheduled_for}")
+
+    except Exception as e:
+        logger.warning(f"maybe_schedule_reminder failed for user {user_id}: {e}")
