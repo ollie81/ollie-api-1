@@ -23,7 +23,7 @@ from personality import OLLIE_PERSONALITY
 from auth import get_current_user
 from event_scheduler import maybe_schedule_event
 from interest_memory import maybe_track_interest, build_interest_context
-
+from event_scheduler import maybe_schedule_event, maybe_schedule_reminder
 logger = logging.getLogger("ollie.chat")
 
 router = APIRouter()
