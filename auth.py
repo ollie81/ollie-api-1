@@ -375,7 +375,7 @@ def google_login(req: GoogleAuthRequest):
         info = id_token.verify_oauth2_token(
             req.id_token,
             google_requests.Request(),
-            "762080204480-pi9vflsb9klhgcggkjcuid214uhaa45q.apps.googleusercontent.com"
+            "431417738635-f3ipimjqmdldh0lfsf44f70irif9eoho.apps.googleusercontent.com"
         )
         email = info["email"]
         name = info.get("name", email)
