@@ -12,12 +12,14 @@
 #     (reuses your existing memory importance scoring)
 #   - never runs on crisis-flagged messages
 #   - dedups by topic so the same event doesn't get scheduled twice
-#   - caps total Ollie-initiated notifications per user per day
+#   - caps total Ollie-initiated check-in notifications per user per day
+#     (explicit reminders below are NOT subject to this cap)
 #
 # Requires a Supabase table "scheduled_events" with columns:
 #   id (uuid, pk), user_id (text), event_summary (text),
 #   topic_key (text), scheduled_for (timestamptz),
 #   status (text: 'pending' | 'sent' | 'skipped'),
+#   kind (text: 'checkin' | 'reminder', default 'checkin'),
 #   created_at (timestamptz)
 #
 # Requires: pip install apscheduler  (add to requirements.txt)
@@ -37,8 +39,9 @@ logger = logging.getLogger("ollie.event_scheduler")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Max Ollie-initiated check-in notifications per user per day.
-# Keeps this feature from ever feeling like spam.
+# Max Ollie-initiated CHECK-IN notifications per user per day.
+# Does not apply to explicit reminders (see below) — those are
+# things the user directly asked for, not proactive check-ins.
 MAX_CHECKINS_PER_USER_PER_DAY = 1
 
 # Sanity bounds on how far out a check-in can be scheduled.
@@ -47,7 +50,7 @@ MAX_HOURS = 24 * 30  # 30 days
 
 
 # ============================================================
-# DETECTION
+# DETECTION — passive check-ins
 # ============================================================
 
 def detect_future_event(text: str) -> dict | None:
@@ -188,6 +191,7 @@ def schedule_event_notification(user_id: str, event_summary: str, hours_until_ch
             "topic_key": topic_key,
             "scheduled_for": scheduled_for,
             "status": "pending",
+            "kind": "checkin",
             "created_at": datetime.utcnow().isoformat(),
         }).execute()
 
@@ -197,67 +201,6 @@ def schedule_event_notification(user_id: str, event_summary: str, hours_until_ch
     except Exception as e:
         logger.error(f"schedule_event_notification failed for user {user_id}: {e}")
         return False
-
-
-# ============================================================
-# SENDING (runs on a periodic scheduler tick)
-# ============================================================
-
-def _checkins_sent_today(user_id: str) -> int:
-    since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-    response = (
-        supabase.table("scheduled_events")
-        .select("id")
-        .eq("user_id", user_id)
-        .eq("status", "sent")
-        .gte("scheduled_for", since)
-        .execute()
-    )
-    return len(response.data) if response.data else 0
-
-
-def run_due_notifications() -> None:
-    """
-    Call this periodically (e.g. every 10 minutes) from a
-    scheduler. Finds due check-ins, respects the per-user daily
-    cap, sends the ones under the cap, and leaves the rest
-    pending to retry on the next tick.
-    """
-    try:
-        now = datetime.utcnow().isoformat()
-        due = (
-            supabase.table("scheduled_events")
-            .select("*")
-            .eq("status", "pending")
-            .lte("scheduled_for", now)
-            .execute()
-        )
-
-        for row in (due.data or []):
-            user_id = row.get("user_id")
-            event_summary = row.get("event_summary", "")
-            row_id = row.get("id")
-
-            try:
-                if _checkins_sent_today(user_id) >= MAX_CHECKINS_PER_USER_PER_DAY:
-                    logger.info(f"run_due_notifications: daily cap hit for user {user_id}, deferring")
-                    continue  # leave pending, retry next tick / next day
-
-                NotificationService.create_notification(
-                    user_id=user_id,
-                    title="Ollie checking in",
-                    body=f"hey — how did it go with {event_summary}?",
-                )
-
-                supabase.table("scheduled_events").update(
-                    {"status": "sent"}
-                ).eq("id", row_id).execute()
-
-            except Exception as e:
-                logger.error(f"run_due_notifications: failed to send for user {user_id}: {e}")
-
-    except Exception as e:
-        logger.error(f"run_due_notifications: query failed: {e}")
 
 
 # ============================================================
@@ -340,3 +283,72 @@ def maybe_schedule_reminder(user_id: str, message: str) -> None:
 
     except Exception as e:
         logger.warning(f"maybe_schedule_reminder failed for user {user_id}: {e}")
+
+
+# ============================================================
+# SENDING (runs on a periodic scheduler tick)
+# ============================================================
+
+def _checkins_sent_today(user_id: str) -> int:
+    since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    response = (
+        supabase.table("scheduled_events")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("status", "sent")
+        .gte("scheduled_for", since)
+        .execute()
+    )
+    return len(response.data) if response.data else 0
+
+
+def run_due_notifications() -> None:
+    """
+    Call this periodically (e.g. every 10 minutes) from a
+    scheduler. Finds due check-ins AND reminders. Reminders
+    always send (they're explicit user requests); check-ins
+    still respect the daily cap.
+    """
+    try:
+        now = datetime.utcnow().isoformat()
+        due = (
+            supabase.table("scheduled_events")
+            .select("*")
+            .eq("status", "pending")
+            .lte("scheduled_for", now)
+            .execute()
+        )
+
+        for row in (due.data or []):
+            user_id = row.get("user_id")
+            event_summary = row.get("event_summary", "")
+            row_id = row.get("id")
+            kind = row.get("kind", "checkin")
+
+            try:
+                if kind == "checkin" and _checkins_sent_today(user_id) >= MAX_CHECKINS_PER_USER_PER_DAY:
+                    logger.info(f"run_due_notifications: daily cap hit for user {user_id}, deferring")
+                    continue  # leave pending, retry next tick / next day
+
+                if kind == "reminder":
+                    title = "Ollie reminding you"
+                    body = event_summary
+                else:
+                    title = "Ollie checking in"
+                    body = f"hey — how did it go with {event_summary}?"
+
+                NotificationService.create_notification(
+                    user_id=user_id,
+                    title=title,
+                    body=body,
+                )
+
+                supabase.table("scheduled_events").update(
+                    {"status": "sent"}
+                ).eq("id", row_id).execute()
+
+            except Exception as e:
+                logger.error(f"run_due_notifications: failed to send for user {user_id}: {e}")
+
+    except Exception as e:
+        logger.error(f"run_due_notifications: query failed: {e}")
