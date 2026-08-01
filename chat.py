@@ -21,13 +21,32 @@ from memory import (
 )
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
-from event_scheduler import maybe_schedule_event
-from interest_memory import maybe_track_interest, build_interest_context
 from event_scheduler import maybe_schedule_event, maybe_schedule_reminder
+from interest_memory import maybe_track_interest, build_interest_context
 logger = logging.getLogger("ollie.chat")
 
 router = APIRouter()
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+@router.get("/history")
+def get_history(current_user: dict = Depends(get_current_user)):
+    """
+    Returns this user's past messages so the chat screen can
+    reload them on open, instead of starting empty every time.
+    """
+    db = OllieDB()
+    history = db.get_conversation_history(current_user["id"], limit=50)
+    return {
+        "messages": [
+            {
+                "sender": msg["sender"],
+                "message": msg["message"],
+                "created_at": msg["created_at"],
+            }
+            for msg in history
+        ]
+    }
 
 # ============================================================
 # REQUEST MODELS
@@ -202,6 +221,11 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         # one now. Only runs on already-important, non-crisis messages,
         # so it doesn't fire on every mention of a date/time.
         maybe_schedule_event(user_id, req.message, importance)
+
+        # Explicit "remind me to X" requests — independent of the
+        # importance gate above, since a reminder request may not
+        # score as memory-worthy on its own.
+        maybe_schedule_reminder(user_id, req.message)
 
         # Track ongoing interests/hobbies mentioned — separate,
         # additive system. Failure here never breaks the reply.
