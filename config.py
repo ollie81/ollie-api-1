@@ -42,6 +42,14 @@ OLLIE_VOICE_ID = os.getenv("PAPLA_VOICE_ID")
 PAPLA_TTS_URL = "https://api.papla.media/v1/text-to-speech"
 
 # ============================================================
+# GOOGLE PLAY BILLING (real purchase verification)
+# ============================================================
+
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON")
+ANDROID_PACKAGE_NAME = os.getenv("ANDROID_PACKAGE_NAME", "com.example.ollie_app")
+PLAY_SUBSCRIPTION_PRODUCT_ID = os.getenv("PLAY_SUBSCRIPTION_PRODUCT_ID")
+
+# ============================================================
 # CORS
 # ============================================================
 
