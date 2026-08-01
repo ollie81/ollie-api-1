@@ -189,8 +189,7 @@ def signup(req: SignupRequest, request: Request):
         result = supabase.table("users").insert({
             "username": req.phone_number,
             "phone": req.phone_number,
-            "password_hash": hashed,
-            "country": "RW"
+            "password_hash": hashed
         }).execute()
 
         user = result.data[0]
@@ -387,8 +386,7 @@ def google_login(req: GoogleAuthRequest):
             result = supabase.table("users").insert({
                 "username": name,
                 "phone": email,
-                "password_hash": "",
-                "country": "RW"
+                "password_hash": ""
             }).execute()
             user = result.data[0]
 
