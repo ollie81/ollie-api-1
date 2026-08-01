@@ -3,10 +3,15 @@
 # ============================================================
 
 from supabase import create_client
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from config import SUPABASE_URL, SUPABASE_KEY
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Max rewarded-ad watches per user per day. Prevents someone
+# from bypassing the daily message limit indefinitely by
+# watching ads back-to-back.
+MAX_AD_WATCHES_PER_DAY = 3
 
 class OllieDB:
     def __init__(self):
@@ -19,8 +24,7 @@ class OllieDB:
         result = self.supabase.table("users").insert({
             "username": username,
             "email": email,
-            "phone": phone,
-            "country": "RW"
+            "phone": phone
         }).execute()
         return result.data[0]
 
@@ -49,6 +53,20 @@ class OllieDB:
             "emotion_score": emotion_score,
             "created_at": datetime.now().isoformat()
         }).execute()
+
+    def get_conversation_history(self, user_id: str, limit: int = 50):
+        """
+        Returns past messages in chronological order (oldest first)
+        for the chat UI to render on load — separate from
+        get_recent_messages, which formats for the LLM prompt.
+        """
+        response = self.supabase.table("conversations") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        return list(reversed(response.data))
 
     def get_recent_messages(self, user_id: str, limit: int = 10):
         """Rebuild conversation history server-side — fixes amnesia"""
@@ -148,17 +166,64 @@ class OllieDB:
                 .eq("id", sub["id"]) \
                 .execute()
 
-    def get_messages_today(self, user_id: str) -> int:
+    # ============================================================
+    # DAILY MESSAGE LIMIT + AD BONUS
+    # ============================================================
+
+    def _get_usage_row(self, user_id: str):
         today = date.today().isoformat()
         result = self.supabase.table("message_usage") \
-            .select("count") \
+            .select("*") \
             .eq("user_id", user_id) \
             .eq("date", today) \
             .execute()
-        return result.data[0].get("count", 0) if result.data else 0
+        return result.data[0] if result.data else None
 
-    def can_send_message(self, user_id: str, limit: int = 50) -> bool:
-        return self.get_messages_today(user_id) < limit
+    def get_messages_today(self, user_id: str) -> int:
+        row = self._get_usage_row(user_id)
+        return row.get("count", 0) if row else 0
+
+    def can_send_message(self, user_id: str, limit: int = 20) -> bool:
+        row = self._get_usage_row(user_id)
+        if row and row.get("ad_bonus_until"):
+            if datetime.fromisoformat(row["ad_bonus_until"]) > datetime.now():
+                return True  # active ad-bonus window, unlimited for now
+        count = row.get("count", 0) if row else 0
+        return count < limit
+
+    def has_active_ad_bonus(self, user_id: str) -> bool:
+        row = self._get_usage_row(user_id)
+        if row and row.get("ad_bonus_until"):
+            return datetime.fromisoformat(row["ad_bonus_until"]) > datetime.now()
+        return False
+
+    def grant_ad_bonus(self, user_id: str, minutes: int = 10) -> bool:
+        """
+        Grants a temporary window of unlimited messaging after a
+        completed rewarded ad. Capped at MAX_AD_WATCHES_PER_DAY so
+        someone can't bypass the daily limit by watching ads
+        back-to-back all day. Returns False if the cap is hit.
+        """
+        today = date.today().isoformat()
+        row = self._get_usage_row(user_id)
+        ads_watched = row.get("ads_watched", 0) if row else 0
+
+        if ads_watched >= MAX_AD_WATCHES_PER_DAY:
+            return False
+
+        bonus_until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+
+        if row:
+            self.supabase.table("message_usage") \
+                .update({"ad_bonus_until": bonus_until, "ads_watched": ads_watched + 1}) \
+                .eq("user_id", user_id).eq("date", today).execute()
+        else:
+            self.supabase.table("message_usage").insert({
+                "user_id": user_id, "date": today, "count": 0,
+                "ad_bonus_until": bonus_until, "ads_watched": 1
+            }).execute()
+
+        return True
 
     def increment_message_count(self, user_id: str):
         today = date.today().isoformat()
