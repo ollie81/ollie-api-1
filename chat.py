@@ -55,6 +55,7 @@ def get_history(current_user: dict = Depends(get_current_user)):
 class ChatRequest(BaseModel):
     message: str
     history: List[dict] = []
+    utc_offset_minutes: int | None = None
 
 class SpeakRequest(BaseModel):
     message: str
@@ -225,7 +226,7 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         # Explicit "remind me to X" requests — independent of the
         # importance gate above, since a reminder request may not
         # score as memory-worthy on its own.
-        maybe_schedule_reminder(user_id, req.message)
+        maybe_schedule_reminder(user_id, req.message, req.utc_offset_minutes)
 
         # Track ongoing interests/hobbies mentioned — separate,
         # additive system. Failure here never breaks the reply.
