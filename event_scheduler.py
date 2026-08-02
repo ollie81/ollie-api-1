@@ -27,7 +27,7 @@
 import json
 import logging
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from openai import OpenAI
 from config import OPENAI_API_KEY
@@ -183,7 +183,7 @@ def schedule_event_notification(user_id: str, event_summary: str, hours_until_ch
             logger.info(f"schedule_event_notification: duplicate topic for user {user_id}, skipping")
             return False
 
-        scheduled_for = (datetime.utcnow() + timedelta(hours=hours_until_checkin)).isoformat()
+        scheduled_for = (datetime.now(timezone.utc) + timedelta(hours=hours_until_checkin)).isoformat()
 
         supabase.table("scheduled_events").insert({
             "user_id": user_id,
@@ -192,7 +192,7 @@ def schedule_event_notification(user_id: str, event_summary: str, hours_until_ch
             "scheduled_for": scheduled_for,
             "status": "pending",
             "kind": "checkin",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
 
         logger.info(f"scheduled check-in for user {user_id} at {scheduled_for}: {event_summary}")
@@ -209,11 +209,30 @@ def schedule_event_notification(user_id: str, event_summary: str, hours_until_ch
 # NOT require importance >= 2, and has no 1-hour minimum delay.
 # ============================================================
 
-def detect_explicit_reminder(text: str) -> dict | None:
+def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -> dict | None:
     if not text or not text.strip():
         return None
 
-    now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now_utc_dt = datetime.now(timezone.utc)
+    now_utc = now_utc_dt.strftime("%Y-%m-%d %H:%M UTC")
+
+    if utc_offset_minutes is not None:
+        local_dt = now_utc_dt + timedelta(minutes=utc_offset_minutes)
+        sign = "+" if utc_offset_minutes >= 0 else "-"
+        offset_str = f"UTC{sign}{abs(utc_offset_minutes) // 60:02d}:{abs(utc_offset_minutes) % 60:02d}"
+        local_time_line = (
+            f"The user's local time right now is {local_dt.strftime('%Y-%m-%d %H:%M')} "
+            f"({offset_str}). When they give a clock time (e.g. \"at 5pm\"), that means "
+            f"5pm in THEIR local time, not UTC — convert accordingly when computing "
+            f"minutes_until."
+        )
+    else:
+        local_time_line = (
+            "The user's local timezone is unknown. If they give a relative time "
+            "(e.g. \"in 20 minutes\"), that's unambiguous — use it directly. If "
+            "they give a clock time (e.g. \"at 5pm\") with no timezone info "
+            "available, assume they mean UTC as a fallback."
+        )
 
     try:
         response = openai_client.chat.completions.create(
@@ -222,14 +241,12 @@ def detect_explicit_reminder(text: str) -> dict | None:
                 {
                     "role": "system",
                     "content": (
-                        f"Current UTC time: {now_utc}. Decide if the user "
-                        "is explicitly asking to be reminded of something "
-                        "(\"remind me to...\", \"don't let me forget...\", "
-                        "\"set a reminder for...\"). If so, work out how "
-                        "many minutes from now the reminder should fire, "
-                        "based on whatever time they gave (relative like "
-                        "\"in 20 minutes\", or a clock time like \"at 5pm\" "
-                        "— compute minutes until that next occurs).\n\n"
+                        f"Current UTC time: {now_utc}. {local_time_line}\n\n"
+                        "Decide if the user is explicitly asking to be "
+                        "reminded of something (\"remind me to...\", "
+                        "\"don't let me forget...\", \"set a reminder "
+                        "for...\"). If so, work out how many minutes from "
+                        "now (UTC) the reminder should fire.\n\n"
                         "Reply with ONLY JSON, no other text:\n"
                         '{"is_reminder": true or false, '
                         '"reminder_text": "short description, or empty string", '
@@ -259,14 +276,14 @@ def detect_explicit_reminder(text: str) -> dict | None:
         return None
 
 
-def maybe_schedule_reminder(user_id: str, message: str) -> None:
+def maybe_schedule_reminder(user_id: str, message: str, utc_offset_minutes: int | None = None) -> None:
     try:
-        reminder = detect_explicit_reminder(message)
+        reminder = detect_explicit_reminder(message, utc_offset_minutes)
         if not reminder:
             return
 
         scheduled_for = (
-            datetime.utcnow() + timedelta(minutes=reminder["minutes_until"])
+            datetime.now(timezone.utc) + timedelta(minutes=reminder["minutes_until"])
         ).isoformat()
 
         supabase.table("scheduled_events").insert({
@@ -276,7 +293,7 @@ def maybe_schedule_reminder(user_id: str, message: str) -> None:
             "scheduled_for": scheduled_for,
             "status": "pending",
             "kind": "reminder",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
 
         logger.info(f"scheduled explicit reminder for user {user_id} at {scheduled_for}")
@@ -290,7 +307,7 @@ def maybe_schedule_reminder(user_id: str, message: str) -> None:
 # ============================================================
 
 def _checkins_sent_today(user_id: str) -> int:
-    since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     response = (
         supabase.table("scheduled_events")
         .select("id")
@@ -310,7 +327,7 @@ def run_due_notifications() -> None:
     still respect the daily cap.
     """
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         due = (
             supabase.table("scheduled_events")
             .select("*")
