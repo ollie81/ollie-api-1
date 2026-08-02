@@ -3,7 +3,7 @@
 # ============================================================
 
 from supabase import create_client
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from config import SUPABASE_URL, SUPABASE_KEY
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -31,7 +31,7 @@ class OllieDB:
     def start_session(self, user_id: str):
         result = self.supabase.table("sessions").insert({
             "user_id": user_id,
-            "session_start": datetime.now().isoformat()
+            "session_start": datetime.now(timezone.utc).isoformat()
         }).execute()
         if not result.data:
             raise Exception("Failed to create session")
@@ -39,7 +39,7 @@ class OllieDB:
 
     def end_session(self, session_id: str, message_count: int, duration_minutes: int):
         self.supabase.table("sessions").update({
-            "session_end": datetime.now().isoformat(),
+            "session_end": datetime.now(timezone.utc).isoformat(),
             "message_count": message_count,
             "duration_minutes": duration_minutes
         }).eq("id", session_id).execute()
@@ -51,7 +51,7 @@ class OllieDB:
             "message": message,
             "sender": sender,
             "emotion_score": emotion_score,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat()
         }).execute()
 
     def get_conversation_history(self, user_id: str, limit: int = 50):
@@ -183,10 +183,23 @@ class OllieDB:
         row = self._get_usage_row(user_id)
         return row.get("count", 0) if row else 0
 
+    @staticmethod
+    def _parse_utc(iso_str: str) -> datetime:
+        """
+        Parses a stored ISO timestamp as UTC even if it's missing a
+        timezone marker (e.g. an old row saved before timezone-aware
+        writes were added). Prevents 'naive vs aware' comparison
+        crashes on data written by an older version of this code.
+        """
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
     def can_send_message(self, user_id: str, limit: int = 20) -> bool:
         row = self._get_usage_row(user_id)
         if row and row.get("ad_bonus_until"):
-            if datetime.fromisoformat(row["ad_bonus_until"]) > datetime.now():
+            if self._parse_utc(row["ad_bonus_until"]) > datetime.now(timezone.utc):
                 return True  # active ad-bonus window, unlimited for now
         count = row.get("count", 0) if row else 0
         return count < limit
@@ -194,7 +207,7 @@ class OllieDB:
     def has_active_ad_bonus(self, user_id: str) -> bool:
         row = self._get_usage_row(user_id)
         if row and row.get("ad_bonus_until"):
-            return datetime.fromisoformat(row["ad_bonus_until"]) > datetime.now()
+            return self._parse_utc(row["ad_bonus_until"]) > datetime.now(timezone.utc)
         return False
 
     def grant_ad_bonus(self, user_id: str, minutes: int = 10) -> bool:
@@ -211,7 +224,7 @@ class OllieDB:
         if ads_watched >= MAX_AD_WATCHES_PER_DAY:
             return False
 
-        bonus_until = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+        bonus_until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
 
         if row:
             self.supabase.table("message_usage") \
