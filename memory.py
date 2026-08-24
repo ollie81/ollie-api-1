@@ -445,6 +445,75 @@ def detect_mood(text: str) -> str | None:
         return None
 
 # ============================================================
+# GOAL DETECTION
+# ============================================================
+# Wires up OllieDB.save_goal / the "ACTIVE GOALS" prompt slot in
+# build_memory_context — both already existed, but nothing ever
+# created a goal row. Only handles creation, not completion —
+# matching a mention back to an existing goal and deciding
+# whether it means "done" vs "gave up" vs "still going" is a
+# fuzzier problem than detection alone, deliberately left alone
+# here rather than guessed at.
+
+def extract_goal(text: str) -> str | None:
+    """
+    Reads whether the message expresses a concrete personal goal
+    or intention the person is actively working toward right now
+    — not a vague wish, and not something already completed or
+    abandoned. Returns a short goal title, or None if nothing
+    like that is expressed.
+    """
+    if not text or not text.strip():
+        return None
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Decide if this message expresses a concrete "
+                        "personal goal or intention the person is "
+                        "actively working toward right now (e.g. \"my "
+                        "goal is to get promoted this year\", \"I'm "
+                        "trying to run a marathon\", \"I want to save "
+                        "$10k\"). Ignore vague wishes, goals already "
+                        "completed or abandoned, and anything that "
+                        "isn't really a forward-looking personal goal.\n\n"
+                        "Reply with ONLY a JSON object, no other text:\n"
+                        '{"has_goal": true or false, '
+                        '"goal": "short 3-8 word title, or empty string"}'
+                    )
+                },
+                {"role": "user", "content": text}
+            ],
+            max_completion_tokens=60,
+            temperature=0,
+            timeout=10,
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            return None
+
+        data = json.loads(content.strip())
+
+        if not data.get("has_goal"):
+            return None
+
+        goal = (data.get("goal") or "").strip()
+
+        if not goal or len(goal) > 100:
+            return None
+
+        return goal
+
+    except Exception as e:
+        logger.warning(f"extract_goal failed, skipping: {e}")
+        return None
+
+# ============================================================
 # MODERATION
 # ============================================================
 # Flags content via OpenAI's moderation endpoint. Observability

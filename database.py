@@ -13,6 +13,11 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # watching ads back-to-back.
 MAX_AD_WATCHES_PER_DAY = 3
 
+# Gap of inactivity after which the next message starts a new
+# session instead of continuing the last one. 30 minutes matches
+# the common analytics-industry default (e.g. Google Analytics).
+SESSION_GAP_MINUTES = 30
+
 class OllieDB:
     def __init__(self):
         self.supabase = supabase
@@ -37,12 +42,56 @@ class OllieDB:
             raise Exception("Failed to create session")
         return result.data[0]
 
-    def end_session(self, session_id: str, message_count: int, duration_minutes: int):
+    def end_session(self, session_id: str, message_count: int, duration_minutes: int, ended_at: datetime = None):
         self.supabase.table("sessions").update({
-            "session_end": datetime.now(timezone.utc).isoformat(),
+            "session_end": (ended_at or datetime.now(timezone.utc)).isoformat(),
             "message_count": message_count,
             "duration_minutes": duration_minutes
         }).eq("id", session_id).execute()
+
+    def _last_message_time(self, session_id: str):
+        result = self.supabase.table("conversations") \
+            .select("created_at") \
+            .eq("session_id", session_id) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        return self._parse_utc(result.data[0]["created_at"]) if result.data else None
+
+    def get_or_create_session(self, user_id: str) -> str:
+        """
+        Reuses the user's still-open session if their last message
+        was within SESSION_GAP_MINUTES; otherwise closes it out —
+        dated to that last message, not now, so a session closed
+        out late (the user's next message might be days later)
+        still gets an accurate end time and duration — and starts
+        a fresh one.
+        """
+        open_result = self.supabase.table("sessions") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .is_("session_end", "null") \
+            .order("session_start", desc=True) \
+            .limit(1) \
+            .execute()
+
+        if open_result.data:
+            session = open_result.data[0]
+            reference_time = self._last_message_time(session["id"]) or self._parse_utc(session["session_start"])
+
+            if datetime.now(timezone.utc) - reference_time < timedelta(minutes=SESSION_GAP_MINUTES):
+                return session["id"]
+
+            messages = self.supabase.table("conversations") \
+                .select("id") \
+                .eq("session_id", session["id"]) \
+                .execute()
+            message_count = len(messages.data) if messages.data else 0
+            started_at = self._parse_utc(session["session_start"])
+            duration_minutes = max(0, int((reference_time - started_at).total_seconds() // 60))
+            self.end_session(session["id"], message_count, duration_minutes, ended_at=reference_time)
+
+        return self.start_session(user_id)["id"]
 
     def save_message(self, user_id: str, session_id: str, message: str, sender: str, emotion_score: float = None):
         self.supabase.table("conversations").insert({
@@ -120,6 +169,23 @@ class OllieDB:
             self.supabase.table("moods").update(mood_data).eq("id", existing.data[0]["id"]).execute()
         else:
             self.supabase.table("moods").insert(mood_data).execute()
+
+    def save_goal(self, user_id: str, title: str) -> None:
+        # Dedup against existing active goals (case-insensitive),
+        # same shape as save_memory/save_interest, so mentioning
+        # the same goal again doesn't create duplicates.
+        existing = self.supabase.table("goals") \
+            .select("id") \
+            .eq("user_id", user_id) \
+            .eq("status", "active") \
+            .ilike("title", title) \
+            .execute()
+        if not existing.data:
+            self.supabase.table("goals").insert({
+                "user_id": user_id,
+                "title": title,
+                "status": "active",
+            }).execute()
 
     def get_user_context(self, user_id: str):
         memories = self.get_relevant_memories(user_id)
