@@ -16,6 +16,7 @@ from memory import (
     build_memory_context,
     clean_history,
     extract_memory_worthy,
+    detect_mood,
     pick_chat_model,
     FLAGSHIP_MODEL,
     CRISIS_KEYWORDS,
@@ -282,6 +283,12 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         memory_text, importance = extract_memory_worthy(req.message)
         if memory_text:
             db.save_memory(user_id, memory_text, importance=importance)
+
+        # Update today's mood if this message clearly conveys one —
+        # feeds the "MOOD TODAY" block back into tomorrow's context.
+        mood = detect_mood(req.message)
+        if mood:
+            db.update_mood(user_id, mood)
 
         # Check if this message describes a meaningful future event
         # (interview, exam, first date, deadline, family event —

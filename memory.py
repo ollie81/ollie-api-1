@@ -4,6 +4,7 @@
 # MEMORY — Language detection + memory helpers (production)
 # ============================================================
 
+import json
 import logging
 import time
 
@@ -378,6 +379,70 @@ def extract_memory_worthy(text: str) -> tuple[str | None, int]:
     except Exception as e:
         logger.warning(f"extract_memory_worthy failed, skipping: {e}")
         return None, 0
+
+# ============================================================
+# MOOD DETECTION
+# ============================================================
+# Wires up OllieDB.update_mood / the "MOOD TODAY" prompt slot in
+# build_memory_context, both of which already existed with no
+# write path anywhere calling them — moods were readable but
+# never actually set. Mirrors extract_interest's shape: a cheap
+# fast-model call, skips on anything unclear, never raises.
+
+def detect_mood(text: str) -> str | None:
+    """
+    Reads the user's current mood from their message — not
+    keyword matching, so it generalizes past a fixed word list.
+    Returns a short lowercase mood label (e.g. "stressed",
+    "happy", "anxious"), or None if the message doesn't clearly
+    convey one (small talk, questions, neutral statements, etc).
+    """
+    if not text or not text.strip():
+        return None
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Decide if this message clearly conveys how the "
+                        "person is feeling right now — their mood, not "
+                        "just the topic they're discussing. Ignore "
+                        "neutral small talk, questions, or anything "
+                        "where a mood isn't actually expressed.\n\n"
+                        "Reply with ONLY a JSON object, no other text:\n"
+                        '{"has_mood": true or false, '
+                        '"mood": "one lowercase word, or empty string"}'
+                    )
+                },
+                {"role": "user", "content": text}
+            ],
+            max_completion_tokens=40,
+            temperature=0,
+            timeout=10,
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            return None
+
+        data = json.loads(content.strip())
+
+        if not data.get("has_mood"):
+            return None
+
+        mood = (data.get("mood") or "").strip().lower()
+
+        if not mood or len(mood) > 20 or " " in mood:
+            return None
+
+        return mood
+
+    except Exception as e:
+        logger.warning(f"detect_mood failed, skipping: {e}")
+        return None
 
 # ============================================================
 # MODERATION
