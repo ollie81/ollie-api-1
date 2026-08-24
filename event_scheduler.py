@@ -209,6 +209,57 @@ def schedule_event_notification(user_id: str, event_summary: str, hours_until_ch
 # NOT require importance >= 2, and has no 1-hour minimum delay.
 # ============================================================
 
+def _compute_reminder_datetime(parsed: dict, utc_offset_minutes: int | None, now_utc: datetime) -> datetime | None:
+    """
+    Turns the model's structured, low-arithmetic extraction into
+    an actual UTC datetime. All the real date math happens here,
+    in code, not in the model's head — asking a fast model to
+    directly compute "minutes from now" itself requires it to do
+    timezone conversion + relative-time math in one shot, which is
+    exactly the kind of multi-step arithmetic small/fast models get
+    wrong, silently landing reminders at the wrong time (including
+    in the past, which then gets clamped to "fire in 1 minute").
+    """
+    time_type = parsed.get("time_type")
+
+    if time_type == "relative":
+        minutes = parsed.get("relative_minutes")
+        if not isinstance(minutes, (int, float)):
+            return None
+        return now_utc + timedelta(minutes=max(1, int(minutes)))
+
+    if time_type != "absolute":
+        return None
+
+    hour = parsed.get("absolute_hour")
+    minute = parsed.get("absolute_minute")
+    if not isinstance(hour, (int, float)) or not isinstance(minute, (int, float)):
+        return None
+    hour, minute = int(hour), int(minute)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    days_from_today = parsed.get("days_from_today")
+    if not isinstance(days_from_today, (int, float)) or days_from_today < 0:
+        days_from_today = 0
+    days_from_today = int(days_from_today)
+
+    offset = utc_offset_minutes or 0
+    # Wall-clock local time, kept as a UTC-tagged datetime purely
+    # so arithmetic works — converted back to true UTC at the end.
+    local_now = now_utc + timedelta(minutes=offset)
+    target_local = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0) \
+        + timedelta(days=days_from_today)
+
+    # No specific future day was given and that clock time already
+    # passed today — they obviously meant the next occurrence, not
+    # right now or the past.
+    if days_from_today == 0 and target_local <= local_now:
+        target_local += timedelta(days=1)
+
+    return target_local - timedelta(minutes=offset)
+
+
 def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -> dict | None:
     if not text or not text.strip():
         return None
@@ -222,16 +273,13 @@ def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -
         offset_str = f"UTC{sign}{abs(utc_offset_minutes) // 60:02d}:{abs(utc_offset_minutes) % 60:02d}"
         local_time_line = (
             f"The user's local time right now is {local_dt.strftime('%Y-%m-%d %H:%M')} "
-            f"({offset_str}). When they give a clock time (e.g. \"at 5pm\"), that means "
-            f"5pm in THEIR local time, not UTC — convert accordingly when computing "
-            f"minutes_until."
+            f"({offset_str}), a {local_dt.strftime('%A')}. A clock time like "
+            f"\"5pm\" means 5pm in THEIR local time."
         )
     else:
         local_time_line = (
-            "The user's local timezone is unknown. If they give a relative time "
-            "(e.g. \"in 20 minutes\"), that's unambiguous — use it directly. If "
-            "they give a clock time (e.g. \"at 5pm\") with no timezone info "
-            "available, assume they mean UTC as a fallback."
+            "The user's local timezone is unknown — treat any clock time they "
+            "give as their local time; it'll be assumed UTC as a fallback."
         )
 
     try:
@@ -245,17 +293,31 @@ def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -
                         "Decide if the user is explicitly asking to be "
                         "reminded of something (\"remind me to...\", "
                         "\"don't let me forget...\", \"set a reminder "
-                        "for...\"). If so, work out how many minutes from "
-                        "now (UTC) the reminder should fire.\n\n"
+                        "for...\").\n\n"
+                        "If a RELATIVE duration is given (\"in 20 minutes\", "
+                        "\"in 2 hours\"), set time_type to \"relative\" and "
+                        "fill relative_minutes with just the raw number of "
+                        "minutes — no other math.\n\n"
+                        "If an ABSOLUTE clock time is given (\"at 5pm\", "
+                        "\"at 9:30\"), set time_type to \"absolute\" and "
+                        "fill absolute_hour (0-23) and absolute_minute "
+                        "(0-59) in THEIR local time, plus days_from_today "
+                        "(0 = today/unspecified, 1 = tomorrow, 2 = day "
+                        "after, etc). Do not compute how far away that is "
+                        "— just report the clock time and day, as given.\n\n"
                         "Reply with ONLY JSON, no other text:\n"
                         '{"is_reminder": true or false, '
                         '"reminder_text": "short description, or empty string", '
-                        '"minutes_until": integer}'
+                        '"time_type": "relative" or "absolute", '
+                        '"relative_minutes": integer or null, '
+                        '"absolute_hour": integer or null, '
+                        '"absolute_minute": integer or null, '
+                        '"days_from_today": integer or null}'
                     )
                 },
                 {"role": "user", "content": text}
             ],
-            max_completion_tokens=100,
+            max_completion_tokens=150,
             temperature=0,
             timeout=10,
         )
@@ -266,11 +328,16 @@ def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -
         if not data.get("is_reminder"):
             return None
         reminder_text = (data.get("reminder_text") or "").strip()
-        minutes = data.get("minutes_until")
-        if not reminder_text or not isinstance(minutes, (int, float)):
+        if not reminder_text:
             return None
-        minutes = max(1, min(int(minutes), MAX_HOURS * 60))
-        return {"reminder_text": reminder_text, "minutes_until": minutes}
+
+        target_dt = _compute_reminder_datetime(data, utc_offset_minutes, now_utc_dt)
+        if target_dt is None:
+            return None
+
+        minutes_until = (target_dt - now_utc_dt).total_seconds() / 60
+        minutes_until = max(1, min(int(minutes_until), MAX_HOURS * 60))
+        return {"reminder_text": reminder_text, "minutes_until": minutes_until}
     except Exception as e:
         logger.warning(f"detect_explicit_reminder failed, skipping: {e}")
         return None
