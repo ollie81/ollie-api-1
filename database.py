@@ -441,27 +441,48 @@ class OllieDB:
         completed rewarded ad. Capped at MAX_AD_WATCHES_PER_DAY so
         someone can't bypass the daily limit by watching ads
         back-to-back all day. Returns False if the cap is hit.
+
+        Same optimistic-concurrency shape as try_consume_message /
+        try_consume_voice_trial -- a plain read-then-write here
+        would let two concurrent grants (a retried request after a
+        dropped response, or a client calling the endpoint directly
+        without watching another ad) both read the same ads_watched
+        and both get through, since neither sees the other's write
+        before deciding.
         """
         today = date.today().isoformat()
-        row = self._get_usage_row(user_id)
-        ads_watched = row.get("ads_watched", 0) if row else 0
-
-        if ads_watched >= MAX_AD_WATCHES_PER_DAY:
-            return False
-
         bonus_until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
 
-        if row:
-            self.supabase.table("message_usage") \
-                .update({"ad_bonus_until": bonus_until, "ads_watched": ads_watched + 1}) \
-                .eq("user_id", user_id).eq("date", today).execute()
-        else:
-            self.supabase.table("message_usage").insert({
-                "user_id": user_id, "date": today, "count": 0,
-                "ad_bonus_until": bonus_until, "ads_watched": 1
-            }).execute()
+        for _ in range(5):
+            row = self._get_usage_row(user_id)
+            ads_watched = row.get("ads_watched", 0) if row else 0
 
-        return True
+            if ads_watched >= MAX_AD_WATCHES_PER_DAY:
+                return False
+
+            if not row:
+                try:
+                    self.supabase.table("message_usage").insert({
+                        "user_id": user_id, "date": today, "count": 0,
+                        "ad_bonus_until": bonus_until, "ads_watched": 1,
+                    }).execute()
+                    return True
+                except Exception:
+                    continue  # someone else's insert for today already landed -- re-read and retry
+
+            result = self.supabase.table("message_usage") \
+                .update({"ad_bonus_until": bonus_until, "ads_watched": ads_watched + 1}) \
+                .eq("user_id", user_id) \
+                .eq("date", today) \
+                .eq("ads_watched", ads_watched) \
+                .execute()
+            if result.data:
+                return True
+            # else: ads_watched changed under us since the read above -- someone else granted first, retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
 
     def increment_message_count(self, user_id: str):
         today = date.today().isoformat()
