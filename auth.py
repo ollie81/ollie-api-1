@@ -293,6 +293,19 @@ def refresh_token(req: RefreshRequest):
         "token_type": "bearer"
     }
 
+def cleanup_expired_refresh_tokens() -> None:
+    """
+    Periodic sweep for the scheduler. Expired rows otherwise only
+    get deleted lazily when someone actually hits /refresh with
+    them — a token that expires and is never retried again would
+    sit in the table forever without this.
+    """
+    try:
+        now = datetime.utcnow().isoformat()
+        supabase.table("refresh_tokens").delete().lt("expires_at", now).execute()
+    except Exception as e:
+        logger.error(f"cleanup_expired_refresh_tokens failed: {e}")
+
 @router.post("/logout")
 def logout(req: LogoutRequest):
     hashed = hash_refresh_token(req.refresh_token)
