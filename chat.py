@@ -280,7 +280,6 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
 
     # Save user message
     db.save_message(user_id, session_id, message, "user")
-    db.increment_message_count(user_id)
 
     # Get response
     reply = get_ollie_response(message, language, server_history, prompt_context, model, utc_offset_minutes)
@@ -353,13 +352,18 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # can_send_message enforces the free-tier daily cap; it doesn't
-    # know about premium itself, so that's checked here — same
-    # split as the voice gating above. Premium is meant to mean
-    # unlimited messages (the app's own upsell copy already says
-    # so), so it bypasses the cap entirely rather than getting a
-    # bigger number.
-    if not is_premium_active(user_id) and not db.can_send_message(user_id):
+    # Premium bypasses the daily cap entirely (the app's own upsell
+    # copy already promises unlimited messages) but still gets
+    # tracked for the informational "messages used today" display in
+    # Settings -- that's never enforced against, so a plain
+    # increment is fine there. Free-tier goes through
+    # try_consume_message instead of a separate check-then-increment
+    # (what this used to be): doing those as two steps lets
+    # concurrent requests both read the same count and both pass,
+    # since neither sees the other's increment yet.
+    if is_premium_active(user_id):
+        db.increment_message_count(user_id)
+    elif not db.try_consume_message(user_id):
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
@@ -410,6 +414,11 @@ async def chat_voice(
 
     if not transcribed_text:
         raise HTTPException(status_code=400, detail="Couldn't hear anything in that recording")
+
+    # Always premium here (checked above) -- tracked the same way
+    # the text route tracks premium usage: informational only,
+    # never enforced against.
+    db.increment_message_count(user_id)
 
     try:
         result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes)
@@ -477,9 +486,14 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # Voice costs real money per use (Papla TTS) — premium-only,
-    # not a free daily allowance like it used to be.
-    if not is_premium_active(current_user["id"]):
+    # Voice costs real money per use (Papla TTS). Premium is
+    # unlimited; everyone else gets a one-time ~60-second trial
+    # (across however many messages they tap the speaker icon on)
+    # so they can hear Ollie speak real replies before deciding,
+    # then it's premium-only.
+    db = OllieDB()
+    user_id = current_user["id"]
+    if not is_premium_active(user_id) and not db.try_consume_voice_trial(user_id, req.message):
         raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
 
     audio = _synthesize_speech(req.message)

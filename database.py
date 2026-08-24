@@ -18,6 +18,16 @@ MAX_AD_WATCHES_PER_DAY = 3
 # the common analytics-industry default (e.g. Google Analytics).
 SESSION_GAP_MINUTES = 30
 
+# Free lifetime voice trial -- "hear Ollie speak real replies"
+# rather than the fixed canned /speak/preview line, capped so it
+# stays a taste rather than an ongoing free tier.
+TRIAL_VOICE_SECONDS_LIMIT = 60
+
+# Rough estimate of spoken characters per second (~150 wpm, ~6
+# chars/word including the space) -- good enough for budgeting a
+# one-time trial, not meant to be exact.
+ESTIMATED_CHARS_PER_SECOND = 15
+
 class OllieDB:
     def __init__(self):
         self.supabase = supabase
@@ -324,13 +334,100 @@ class OllieDB:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
 
-    def can_send_message(self, user_id: str, limit: int = 20) -> bool:
-        row = self._get_usage_row(user_id)
-        if row and row.get("ad_bonus_until"):
-            if self._parse_utc(row["ad_bonus_until"]) > datetime.now(timezone.utc):
-                return True  # active ad-bonus window, unlimited for now
-        count = row.get("count", 0) if row else 0
-        return count < limit
+    def try_consume_message(self, user_id: str, limit: int = 20) -> bool:
+        """
+        Atomically checks-and-increments the free-tier daily message
+        count in one step. A plain read-then-write (check the count,
+        then separately increment it) lets two concurrent requests
+        both read the same count and both pass, since neither sees
+        the other's increment before making its own decision -- this
+        instead only applies the increment if the count still
+        matches what was just read (optimistic concurrency), so a
+        losing request notices and retries against the fresh value
+        instead of silently over-granting.
+
+        Returns False (count left untouched) once the limit is hit.
+        Callers that already know the user is premium should call
+        increment_message_count directly instead -- this always
+        enforces limit, it doesn't know about premium itself (same
+        split as before).
+        """
+        today = date.today().isoformat()
+
+        for _ in range(5):
+            row = self._get_usage_row(user_id)
+
+            if row and row.get("ad_bonus_until"):
+                if self._parse_utc(row["ad_bonus_until"]) > datetime.now(timezone.utc):
+                    return True  # active ad-bonus window, unlimited -- nothing to track
+
+            if not row:
+                try:
+                    self.supabase.table("message_usage").insert({
+                        "user_id": user_id, "date": today, "count": 1,
+                    }).execute()
+                    return True
+                except Exception:
+                    continue  # someone else's insert for today already landed -- re-read and retry
+
+            count = row.get("count", 0)
+            if count >= limit:
+                return False
+
+            result = self.supabase.table("message_usage") \
+                .update({"count": count + 1}) \
+                .eq("user_id", user_id) \
+                .eq("date", today) \
+                .eq("count", count) \
+                .execute()
+            if result.data:
+                return True
+            # else: count changed under us since the read above -- someone else incremented first, retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
+
+    def try_consume_voice_trial(self, user_id: str, text: str) -> bool:
+        """
+        Atomic check-and-consume against the free lifetime voice
+        trial (TRIAL_VOICE_SECONDS_LIMIT), same optimistic-
+        concurrency shape as try_consume_message -- an estimated
+        duration is deducted, but only if the running total still
+        matches what was just read, so two taps in quick succession
+        can't both read the same remaining budget and both pass.
+
+        Returns False (nothing consumed) if the estimated duration
+        would exceed the remaining budget -- including when it's
+        already exhausted. Callers should only call this for
+        non-premium users; it always enforces the trial cap, it
+        doesn't know about premium itself.
+        """
+        estimated_seconds = max(1, round(len(text) / ESTIMATED_CHARS_PER_SECOND))
+
+        for _ in range(5):
+            result = self.supabase.table("users") \
+                .select("voice_trial_seconds_used") \
+                .eq("id", user_id) \
+                .single() \
+                .execute()
+            used = (result.data or {}).get("voice_trial_seconds_used") or 0
+
+            if used + estimated_seconds > TRIAL_VOICE_SECONDS_LIMIT:
+                return False
+
+            update_result = self.supabase.table("users") \
+                .update({"voice_trial_seconds_used": used + estimated_seconds}) \
+                .eq("id", user_id) \
+                .eq("voice_trial_seconds_used", used) \
+                .execute()
+            if update_result.data:
+                return True
+            # else: used changed under us since the read above -- someone else consumed first, retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
 
     def has_active_ad_bonus(self, user_id: str) -> bool:
         row = self._get_usage_row(user_id)
