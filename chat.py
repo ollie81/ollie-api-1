@@ -17,6 +17,7 @@ from memory import (
     clean_history,
     extract_memory_worthy,
     detect_mood,
+    extract_goal,
     pick_chat_model,
     FLAGSHIP_MODEL,
     CRISIS_KEYWORDS,
@@ -223,8 +224,7 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
-        session = db.start_session(user_id)
-        session_id = session["id"]
+        session_id = db.get_or_create_session(user_id)
 
         # Detect language
         language = detect_language(req.message)
@@ -289,6 +289,12 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         mood = detect_mood(req.message)
         if mood:
             db.update_mood(user_id, mood)
+
+        # Save a goal if one was clearly expressed — feeds the
+        # "ACTIVE GOALS" block back into future context.
+        goal = extract_goal(req.message)
+        if goal:
+            db.save_goal(user_id, goal)
 
         # Check if this message describes a meaningful future event
         # (interview, exam, first date, deadline, family event —
