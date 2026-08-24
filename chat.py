@@ -334,7 +334,11 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     # additive system. Failure here never breaks the reply.
     maybe_track_interest(user_id, message)
 
-    return {"reply": reply, "language": language, "model_used": model}
+    # Daily streak — credits at most once per local calendar day,
+    # so this is safe to call on every message.
+    streak = db.update_streak(user_id, utc_offset_minutes)
+
+    return {"reply": reply, "language": language, "model_used": model, "streak": streak}
 
 # ============================================================
 # CHAT ROUTE

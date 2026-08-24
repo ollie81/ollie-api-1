@@ -30,6 +30,7 @@ def get_usage(current_user: dict = Depends(get_current_user)):
 
         messages_today = db.get_messages_today(user_id)
         has_bonus = db.has_active_ad_bonus(user_id)
+        current_streak = db.get_streak(user_id)
 
         premium_result = supabase.table("subscriptions") \
             .select("id") \
@@ -43,6 +44,7 @@ def get_usage(current_user: dict = Depends(get_current_user)):
             "daily_limit": 20,
             "has_active_ad_bonus": has_bonus,
             "is_premium": is_premium,
+            "current_streak": current_streak,
         }
     except Exception as e:
         logger.error(f"get_usage failed for user {current_user.get('id')}: {e}")

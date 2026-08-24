@@ -93,6 +93,51 @@ class OllieDB:
 
         return self.start_session(user_id)["id"]
 
+    def update_streak(self, user_id: str, utc_offset_minutes: int | None) -> int:
+        """
+        Call once per incoming message. Increments the user's daily
+        streak the first time they talk to Ollie on a new local
+        calendar day, resets it to 1 if a day was missed, and
+        leaves it alone if they've already been credited today.
+
+        Uses the user's LOCAL date (from utc_offset_minutes), not
+        the server's — a streak that rolls over at UTC midnight
+        would feel wrong for anyone outside UTC. Falls back to UTC
+        if the client didn't send an offset.
+        """
+        offset = timedelta(minutes=utc_offset_minutes or 0)
+        today_local = (datetime.now(timezone.utc) + offset).date()
+
+        result = self.supabase.table("users") \
+            .select("current_streak, last_streak_date") \
+            .eq("id", user_id) \
+            .single() \
+            .execute()
+        row = result.data or {}
+        current_streak = row.get("current_streak") or 0
+        last_date_str = row.get("last_streak_date")
+        last_date = date.fromisoformat(last_date_str) if last_date_str else None
+
+        if last_date == today_local:
+            return current_streak
+
+        new_streak = current_streak + 1 if last_date == today_local - timedelta(days=1) else 1
+
+        self.supabase.table("users").update({
+            "current_streak": new_streak,
+            "last_streak_date": today_local.isoformat(),
+        }).eq("id", user_id).execute()
+
+        return new_streak
+
+    def get_streak(self, user_id: str) -> int:
+        result = self.supabase.table("users") \
+            .select("current_streak") \
+            .eq("id", user_id) \
+            .single() \
+            .execute()
+        return (result.data or {}).get("current_streak") or 0
+
     def save_message(self, user_id: str, session_id: str, message: str, sender: str, emotion_score: float = None):
         self.supabase.table("conversations").insert({
             "user_id": user_id,
