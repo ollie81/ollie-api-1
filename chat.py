@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from typing import List
 
 from config import OPENAI_API_KEY, PAPLA_API_KEY, OLLIE_VOICE_ID, PAPLA_TTS_URL
-from database import OllieDB
+from database import OllieDB, supabase
 from memory import (
     detect_language,
     build_memory_context,
@@ -18,6 +18,7 @@ from memory import (
     extract_memory_worthy,
     pick_chat_model,
     FLAGSHIP_MODEL,
+    CRISIS_KEYWORDS,
 )
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
@@ -157,6 +158,35 @@ def get_ollie_response(
     return "my bad something went wrong - try again"
 
 # ============================================================
+# CRISIS BACKSTOP
+# ============================================================
+# The personality prompt already instructs Ollie to surface a real
+# crisis resource on self-harm/abuse/emergency disclosures, but
+# that's not guaranteed — the model can fail to comply. This is a
+# server-side backstop: guarantees a resource line ships regardless
+# of what the model said, and leaves an audit trail for follow-up.
+
+def _is_crisis_message(text: str) -> bool:
+    text_lower = (text or "").lower()
+    return any(kw in text_lower for kw in CRISIS_KEYWORDS)
+
+
+def _flag_crisis_message(user_id: str, message: str) -> None:
+    logger.warning(f"chat: crisis-keyword match for user {user_id}")
+    try:
+        # Requires a Supabase table "crisis_flags" with columns:
+        # id (uuid, pk, default gen_random_uuid()), user_id (text),
+        # message (text), created_at (timestamptz, default now()).
+        # Best-effort only — safe to leave uncreated, this never
+        # blocks the reply either way.
+        supabase.table("crisis_flags").insert({
+            "user_id": user_id,
+            "message": message,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"chat: could not record crisis_flags row (table may not exist yet): {e}")
+
+# ============================================================
 # CHAT ROUTE
 # ============================================================
 
@@ -206,6 +236,15 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
 
         # Get response
         reply = get_ollie_response(req.message, language, server_history, prompt_context, model)
+
+        # Crisis backstop — guarantee a resource line on flagged
+        # messages regardless of whether the model included one.
+        if _is_crisis_message(req.message):
+            _flag_crisis_message(user_id, req.message)
+            reply = reply.rstrip() + (
+                "\n\nif it ever feels like too much, please reach out to "
+                "a crisis line or someone you trust — i'm not going anywhere either."
+            )
 
         # Save Ollie reply
         db.save_message(user_id, session_id, reply, "ollie", 0.0)
