@@ -1,6 +1,7 @@
 # AUTH — All authentication routes
 # ============================================================
 import hashlib
+import logging
 import secrets
 import random
 import bcrypt
@@ -27,6 +28,7 @@ from database import supabase
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
 security = HTTPBearer()
+logger = logging.getLogger("ollie.auth")
 
 # ============================================================
 # TWILIO CONFIG
@@ -117,7 +119,12 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
+    if not hashed:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode(), hashed.encode())
+    except ValueError:
+        return False
 
 # ============================================================
 # TWILIO HELPERS
@@ -162,7 +169,8 @@ def request_signup_otp(req: SignupOtpRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"request_signup_otp failed for {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail="Could not send OTP, please try again")
 
 
 @router.post("/signup")
@@ -214,7 +222,8 @@ def signup(req: SignupRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"signup failed for {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail="Could not create account, please try again")
 
 @router.post("/login")
 @limiter.limit("10/minute")
@@ -248,7 +257,8 @@ def login(req: AuthRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"login failed for {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail="Could not log in, please try again")
 
 @router.post("/refresh")
 def refresh_token(req: RefreshRequest):
@@ -319,15 +329,19 @@ def forgot_password(req: ForgotRequest, request: Request):
         }).eq("phone", req.phone_number).execute()
 
         return {"success": True, "message": "OTP sent via SMS"}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"forgot_password failed for {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail="Could not send OTP, please try again")
 
 # ============================================================
 # RESET PASSWORD - TWILIO VERIFY API
 # ============================================================
 
 @router.post("/reset")
-def reset_password(req: ResetRequest):
+@limiter.limit("5/minute")
+def reset_password(req: ResetRequest, request: Request):
     try:
         # Verify OTP with Twilio
         verification_check = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
@@ -359,7 +373,8 @@ def reset_password(req: ResetRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"reset_password failed for {req.phone_number}: {e}")
+        raise HTTPException(status_code=500, detail="Could not reset password, please try again")
 
 # ============================================================
 # GOOGLE LOGIN
@@ -408,7 +423,8 @@ def google_login(req: GoogleAuthRequest):
             "token_type": "bearer"
         }
     except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        logger.warning(f"google_login failed: {e}")
+        raise HTTPException(status_code=401, detail="Google sign-in failed")
 
 # ============================================================
 # FCM TOKEN
@@ -425,4 +441,5 @@ def save_fcm_token(
         }).eq("id", current_user["id"]).execute()
         return {"success": True, "message": "FCM token saved"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"save_fcm_token failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not save FCM token")

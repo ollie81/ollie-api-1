@@ -19,6 +19,7 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
@@ -55,7 +56,51 @@ def premium_status(current_user: dict = Depends(get_current_user)):
         .eq("user_id", current_user["id"]) \
         .eq("status", "active") \
         .execute()
-    return {"is_premium": len(result.data) > 0}
+
+    if not result.data:
+        return {"is_premium": False}
+
+    sub = result.data[0]
+    expiry_ms = sub.get("expiry_time_millis") or 0
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    # No expiry on record (legacy row), or not yet expired — active.
+    if expiry_ms <= 0 or now_ms < expiry_ms:
+        return {"is_premium": True}
+
+    # Locally stored expiry has passed. That could mean the sub
+    # genuinely ended, or it auto-renewed on Google's side and we
+    # never heard about it (no Real-time Developer Notifications
+    # webhook wired up yet) — re-check with Play directly rather
+    # than trust our possibly-stale local timestamp.
+    try:
+        service = _get_play_service()
+        play_result = service.purchases().subscriptions().get(
+            packageName=ANDROID_PACKAGE_NAME,
+            subscriptionId=sub.get("product_id") or PLAY_SUBSCRIPTION_PRODUCT_ID,
+            token=sub["purchase_token"],
+        ).execute()
+
+        payment_state = play_result.get("paymentState", 0)
+        new_expiry_ms = int(play_result.get("expiryTimeMillis", 0))
+        still_active = payment_state in (1, 2) and now_ms < new_expiry_ms
+
+        supabase.table("subscriptions").update({
+            "status": "active" if still_active else "expired",
+            "expiry_time_millis": new_expiry_ms,
+        }).eq("id", sub["id"]).execute()
+
+        return {"is_premium": still_active}
+
+    except Exception as e:
+        # Can't confirm either way (misconfigured creds, network,
+        # quota) — fail open rather than cutting off a paying user
+        # over an infra hiccup.
+        logger.warning(
+            f"premium_status: Play re-verification failed for user "
+            f"{current_user['id']}, treating as still active: {e}"
+        )
+        return {"is_premium": True}
 
 
 @router.post("/activate")
