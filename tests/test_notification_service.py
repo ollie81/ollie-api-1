@@ -73,3 +73,50 @@ def test_no_token_never_calls_send_push():
         NotificationService.create_notification("user-1", "title", "body")
 
         mock_send_push.assert_not_called()
+
+
+# ============================================================
+# mark_as_read / delete_notification -- both scoped to user_id so
+# one user can't act on another user's notification by
+# guessing/enumerating an id (previously unscoped -- an IDOR gap).
+# ============================================================
+
+def _mock_update_result(mock_supabase, data):
+    result = MagicMock()
+    result.data = data
+    mock_supabase.table.return_value.update.return_value.eq.return_value.eq.return_value.execute.return_value = result
+
+
+def _mock_delete_result(mock_supabase, data):
+    result = MagicMock()
+    result.data = data
+    mock_supabase.table.return_value.delete.return_value.eq.return_value.eq.return_value.execute.return_value = result
+
+
+def test_mark_as_read_scopes_to_user_id_and_reports_success():
+    with patch("notification_service.supabase") as mock_supabase:
+        _mock_update_result(mock_supabase, [{"id": "notif-1"}])
+
+        assert NotificationService.mark_as_read("notif-1", "user-1") is True
+
+        mock_supabase.table.return_value.update.return_value.eq.assert_called_with("id", "notif-1")
+        mock_supabase.table.return_value.update.return_value.eq.return_value.eq.assert_called_with("user_id", "user-1")
+
+
+def test_mark_as_read_returns_false_for_someone_elses_notification():
+    with patch("notification_service.supabase") as mock_supabase:
+        _mock_update_result(mock_supabase, [])  # id exists, but not owned by this user -- no row matched
+
+        assert NotificationService.mark_as_read("notif-1", "user-2") is False
+
+
+def test_delete_notification_scopes_to_user_id_and_reports_success():
+    with patch("notification_service.supabase") as mock_supabase:
+        _mock_delete_result(mock_supabase, [{"id": "notif-1"}])
+        assert NotificationService.delete_notification("notif-1", "user-1") is True
+
+
+def test_delete_notification_returns_false_for_someone_elses_notification():
+    with patch("notification_service.supabase") as mock_supabase:
+        _mock_delete_result(mock_supabase, [])
+        assert NotificationService.delete_notification("notif-1", "user-2") is False

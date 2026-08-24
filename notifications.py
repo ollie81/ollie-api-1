@@ -12,8 +12,10 @@ router = APIRouter()
 def get_notifications(current_user: dict = Depends(get_current_user)):
     """Get user's notifications"""
     try:
-        notifications = NotificationService.get_user_notifications(current_user["id"])
-        return {"success": True, "notifications": notifications}
+        user_id = current_user["id"]
+        notifications = NotificationService.get_user_notifications(user_id)
+        unread_count = NotificationService.unread_count(user_id)
+        return {"success": True, "notifications": notifications, "unread_count": unread_count}
     except Exception as e:
         logger.error(f"get_notifications failed for user {current_user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail="Could not load notifications")
@@ -25,8 +27,12 @@ def mark_notification_read(
 ):
     """Mark notification as read"""
     try:
-        NotificationService.mark_as_read(notification_id)
+        updated = NotificationService.mark_as_read(notification_id, current_user["id"])
+        if not updated:
+            raise HTTPException(status_code=404, detail="Notification not found")
         return {"success": True, "message": "Notification marked as read"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"mark_notification_read failed for notification {notification_id}: {e}")
         raise HTTPException(status_code=500, detail="Could not update notification")

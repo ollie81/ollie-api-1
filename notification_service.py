@@ -186,13 +186,21 @@ class NotificationService:
         return response.data or []
 
     @staticmethod
-    def mark_as_read(notification_id: str):
-        (
+    def mark_as_read(notification_id: str, user_id: str) -> bool:
+        """
+        Scoped to user_id so one user can't mark (or, via
+        delete_notification, remove) another user's notification
+        by guessing/enumerating an id. Returns whether a row
+        actually matched.
+        """
+        result = (
             supabase.table("notifications")
             .update({"is_read": True})
             .eq("id", notification_id)
+            .eq("user_id", user_id)
             .execute()
         )
+        return bool(result.data)
 
     @staticmethod
     def mark_all_as_read(user_id: str):
@@ -216,10 +224,13 @@ class NotificationService:
         return len(response.data) if response.data else 0
 
     @staticmethod
-    def delete_notification(notification_id: str):
-        (
+    def delete_notification(notification_id: str, user_id: str) -> bool:
+        """Scoped to user_id -- see mark_as_read."""
+        result = (
             supabase.table("notifications")
             .delete()
             .eq("id", notification_id)
+            .eq("user_id", user_id)
             .execute()
         )
+        return bool(result.data)
