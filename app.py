@@ -11,17 +11,19 @@ from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import ALLOWED_ORIGINS
-from auth import router as auth_router
+from auth import router as auth_router, cleanup_expired_refresh_tokens
 from chat import router as chat_router
 from premium import router as premium_router
 from notifications import router as notifications_router
 from event_scheduler import run_due_notifications
 from settings import router as settings_router
 # ============================================================
-# SCHEDULER — checks for due event check-ins periodically
+# SCHEDULER — checks for due event check-ins periodically, and
+# sweeps out expired refresh tokens once a day
 # ============================================================
 background_scheduler = BackgroundScheduler()
 background_scheduler.add_job(run_due_notifications, "interval", minutes=10)
+background_scheduler.add_job(cleanup_expired_refresh_tokens, "interval", hours=24)
 
 
 @asynccontextmanager
