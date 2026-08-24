@@ -430,7 +430,8 @@ class GoogleAuthRequest(BaseModel):
     id_token: str
 
 @router.post("/google")
-def google_login(req: GoogleAuthRequest):
+@limiter.limit("10/minute")
+def google_login(req: GoogleAuthRequest, request: Request):
     try:
         info = id_token.verify_oauth2_token(
             req.id_token,
