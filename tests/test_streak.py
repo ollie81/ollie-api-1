@@ -125,3 +125,22 @@ def test_get_streak_defaults_to_zero_when_missing():
     with patch("database.supabase") as mock_supabase:
         _patch_user_row(mock_supabase, None)
         assert OllieDB().get_streak("user-1") == 0
+
+
+def test_remember_utc_offset_writes_the_value():
+    with patch("database.supabase") as mock_supabase:
+        OllieDB().remember_utc_offset("user-1", 180)
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["last_known_utc_offset_minutes"] == 180
+
+
+def test_remember_utc_offset_skips_write_when_none():
+    with patch("database.supabase") as mock_supabase:
+        OllieDB().remember_utc_offset("user-1", None)
+        mock_supabase.table.assert_not_called()
+
+
+def test_remember_utc_offset_never_raises_on_db_failure():
+    with patch("database.supabase") as mock_supabase:
+        mock_supabase.table.side_effect = Exception("db down")
+        OllieDB().remember_utc_offset("user-1", 60)  # must not raise

@@ -130,6 +130,23 @@ class OllieDB:
 
         return new_streak
 
+    def remember_utc_offset(self, user_id: str, utc_offset_minutes: int | None) -> None:
+        """
+        Best-effort — called on every /chat and /chat/voice request
+        so the daily-message background job (which has no live
+        request to read an offset from) has a reasonably fresh one
+        to compute each user's local time from. A failure here
+        should never break the chat reply.
+        """
+        if utc_offset_minutes is None:
+            return
+        try:
+            self.supabase.table("users").update({
+                "last_known_utc_offset_minutes": utc_offset_minutes,
+            }).eq("id", user_id).execute()
+        except Exception:
+            pass
+
     def get_streak(self, user_id: str) -> int:
         result = self.supabase.table("users") \
             .select("current_streak") \

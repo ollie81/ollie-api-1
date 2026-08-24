@@ -246,6 +246,7 @@ def _flag_moderation(user_id: str, direction: str, text: str, categories: list) 
 
 def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None) -> dict:
     session_id = db.get_or_create_session(user_id)
+    db.remember_utc_offset(user_id, utc_offset_minutes)
 
     # Detect language
     language = detect_language(message)
