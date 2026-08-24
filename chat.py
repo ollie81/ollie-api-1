@@ -348,7 +348,13 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    if not db.can_send_message(user_id):
+    # can_send_message enforces the free-tier daily cap; it doesn't
+    # know about premium itself, so that's checked here — same
+    # split as the voice gating above. Premium is meant to mean
+    # unlimited messages (the app's own upsell copy already says
+    # so), so it bypasses the cap entirely rather than getting a
+    # bigger number.
+    if not is_premium_active(user_id) and not db.can_send_message(user_id):
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
