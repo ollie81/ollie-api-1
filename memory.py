@@ -378,3 +378,42 @@ def extract_memory_worthy(text: str) -> tuple[str | None, int]:
     except Exception as e:
         logger.warning(f"extract_memory_worthy failed, skipping: {e}")
         return None, 0
+
+# ============================================================
+# MODERATION
+# ============================================================
+# Flags content via OpenAI's moderation endpoint. Observability
+# only, by design — this never blocks or alters a reply. In
+# particular it must never auto-refuse on the self-harm categories,
+# since staying present through those is the whole point of the
+# crisis-escalation behavior in the personality prompt; deciding
+# whether/what to hard-block (e.g. sexual/minors) is a product and
+# legal call for a human to make, not something to encode silently
+# here. This just makes sure the data exists to make that call.
+
+def moderate_text(text: str) -> dict | None:
+    """
+    Returns {"flagged": True, "categories": [...]} if OpenAI's
+    moderation endpoint flags anything, else None — including on
+    empty input or any API failure. Never raises: a moderation
+    outage must never break the chat flow.
+    """
+    if not text or not text.strip():
+        return None
+
+    try:
+        response = openai_client.moderations.create(
+            model="omni-moderation-latest",
+            input=text,
+        )
+        result = response.results[0]
+        if not result.flagged:
+            return None
+
+        categories = result.categories.model_dump()
+        flagged = [name for name, is_flagged in categories.items() if is_flagged]
+        return {"flagged": True, "categories": flagged}
+
+    except Exception as e:
+        logger.warning(f"moderate_text failed, skipping: {e}")
+        return None

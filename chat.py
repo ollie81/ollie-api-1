@@ -19,6 +19,7 @@ from memory import (
     pick_chat_model,
     FLAGSHIP_MODEL,
     CRISIS_KEYWORDS,
+    moderate_text,
 )
 from personality import OLLIE_PERSONALITY
 from auth import get_current_user
@@ -186,6 +187,25 @@ def _flag_crisis_message(user_id: str, message: str) -> None:
     except Exception as e:
         logger.warning(f"chat: could not record crisis_flags row (table may not exist yet): {e}")
 
+
+def _flag_moderation(user_id: str, direction: str, text: str, categories: list) -> None:
+    logger.warning(f"chat: moderation flag ({direction}) for user {user_id}: {categories}")
+    try:
+        # Requires a Supabase table "moderation_flags" with columns:
+        # id (uuid, pk, default gen_random_uuid()), user_id (text),
+        # direction (text: 'input' | 'output'), categories (text),
+        # message (text), created_at (timestamptz, default now()).
+        # Best-effort only — safe to leave uncreated, this never
+        # blocks the reply either way.
+        supabase.table("moderation_flags").insert({
+            "user_id": user_id,
+            "direction": direction,
+            "categories": ", ".join(categories),
+            "message": text,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"chat: could not record moderation_flags row (table may not exist yet): {e}")
+
 # ============================================================
 # CHAT ROUTE
 # ============================================================
@@ -207,6 +227,11 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
 
         # Detect language
         language = detect_language(req.message)
+
+        # Moderation — audit trail only, never blocks the reply.
+        input_moderation = moderate_text(req.message)
+        if input_moderation:
+            _flag_moderation(user_id, "input", req.message, input_moderation["categories"])
 
         # Get memories + context
         memories = db.get_relevant_memories(user_id)
@@ -236,6 +261,10 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
 
         # Get response
         reply = get_ollie_response(req.message, language, server_history, prompt_context, model)
+
+        output_moderation = moderate_text(reply)
+        if output_moderation:
+            _flag_moderation(user_id, "output", reply, output_moderation["categories"])
 
         # Crisis backstop — guarantee a resource line on flagged
         # messages regardless of whether the model included one.
