@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 from config import OPENAI_API_KEY
 from database import supabase
-from memory import FAST_MODEL, CRISIS_KEYWORDS
+from memory import FAST_MODEL, FLAGSHIP_MODEL, CRISIS_KEYWORDS
 from notification_service import NotificationService
 
 logger = logging.getLogger("ollie.event_scheduler")
@@ -260,11 +260,18 @@ def _compute_reminder_datetime(parsed: dict, utc_offset_minutes: int | None, now
     return target_local - timedelta(minutes=offset)
 
 
-def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -> dict | None:
-    if not text or not text.strip():
-        return None
+def _looks_like_reminder_request(text: str) -> bool:
+    """
+    Cheap keyword pre-check, used only to decide whether a missed
+    detection is worth a second, more expensive attempt -- not a
+    replacement for the real (language-aware) LLM detection below,
+    just a trigger for retrying it.
+    """
+    text_lower = (text or "").lower()
+    return any(kw in text_lower for kw in ("remind", "reminder", "don't forget", "dont forget"))
 
-    now_utc_dt = datetime.now(timezone.utc)
+
+def _extract_reminder(text: str, utc_offset_minutes: int | None, now_utc_dt: datetime, model: str) -> dict | None:
     now_utc = now_utc_dt.strftime("%Y-%m-%d %H:%M UTC")
 
     if utc_offset_minutes is not None:
@@ -282,64 +289,103 @@ def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -
             "give as their local time; it'll be assumed UTC as a fallback."
         )
 
+    response = openai_client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    f"Current UTC time: {now_utc}. {local_time_line}\n\n"
+                    "Decide if the user is explicitly asking to be "
+                    "reminded of something (\"remind me to...\", "
+                    "\"don't let me forget...\", \"don't forget to "
+                    "remind me...\", \"set a reminder for...\").\n\n"
+                    "If a RELATIVE duration is given (\"in 20 minutes\", "
+                    "\"after 10 minutes\", \"in 2 hours\", \"after an "
+                    "hour\"), set time_type to \"relative\" and fill "
+                    "relative_minutes with just the raw number of "
+                    "minutes — no other math. \"in\" and \"after\" both "
+                    "mean the same thing here: minutes from now.\n\n"
+                    "If an ABSOLUTE clock time is given (\"at 5pm\", "
+                    "\"at 9:30\"), set time_type to \"absolute\" and "
+                    "fill absolute_hour (0-23) and absolute_minute "
+                    "(0-59) in THEIR local time, plus days_from_today "
+                    "(0 = today/unspecified, 1 = tomorrow, 2 = day "
+                    "after, etc). Do not compute how far away that is "
+                    "— just report the clock time and day, as given.\n\n"
+                    "Reply with ONLY JSON, no other text:\n"
+                    '{"is_reminder": true or false, '
+                    '"reminder_text": "short description, or empty string", '
+                    '"time_type": "relative" or "absolute", '
+                    '"relative_minutes": integer or null, '
+                    '"absolute_hour": integer or null, '
+                    '"absolute_minute": integer or null, '
+                    '"days_from_today": integer or null}'
+                )
+            },
+            {"role": "user", "content": text}
+        ],
+        max_completion_tokens=150,
+        temperature=0,
+        timeout=10,
+    )
+    content = response.choices[0].message.content
+    if not content:
+        return None
+    data = json.loads(content.strip())
+    if not data.get("is_reminder"):
+        return None
+    reminder_text = (data.get("reminder_text") or "").strip()
+    if not reminder_text:
+        return None
+
+    target_dt = _compute_reminder_datetime(data, utc_offset_minutes, now_utc_dt)
+    if target_dt is None:
+        return None
+
+    minutes_until = (target_dt - now_utc_dt).total_seconds() / 60
+    minutes_until = max(1, min(int(minutes_until), MAX_HOURS * 60))
+    return {"reminder_text": reminder_text, "minutes_until": minutes_until}
+
+
+def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -> dict | None:
+    """
+    Ollie's actual chat reply is a SEPARATE model call from this
+    one (see get_ollie_response in chat.py) -- it can confidently
+    promise "I'll remind you" from conversational context alone,
+    with no idea whether this function actually parsed the same
+    message as a reminder. That means a miss here silently breaks
+    a promise the user just heard, with no feedback that anything
+    went wrong.
+
+    To cut down on that: a first pass on the fast model that comes
+    back empty gets retried once on the flagship model, but ONLY
+    when the message contains an obvious reminder cue (see
+    _looks_like_reminder_request) -- otherwise every ordinary
+    message would pay for a second, pricier call just to confirm
+    it isn't a reminder. Doesn't guarantee a catch, but a slower,
+    stronger second look at an obvious miss is worth the cost.
+    """
+    if not text or not text.strip():
+        return None
+
+    now_utc_dt = datetime.now(timezone.utc)
+
     try:
-        response = openai_client.chat.completions.create(
-            model=FAST_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"Current UTC time: {now_utc}. {local_time_line}\n\n"
-                        "Decide if the user is explicitly asking to be "
-                        "reminded of something (\"remind me to...\", "
-                        "\"don't let me forget...\", \"set a reminder "
-                        "for...\").\n\n"
-                        "If a RELATIVE duration is given (\"in 20 minutes\", "
-                        "\"in 2 hours\"), set time_type to \"relative\" and "
-                        "fill relative_minutes with just the raw number of "
-                        "minutes — no other math.\n\n"
-                        "If an ABSOLUTE clock time is given (\"at 5pm\", "
-                        "\"at 9:30\"), set time_type to \"absolute\" and "
-                        "fill absolute_hour (0-23) and absolute_minute "
-                        "(0-59) in THEIR local time, plus days_from_today "
-                        "(0 = today/unspecified, 1 = tomorrow, 2 = day "
-                        "after, etc). Do not compute how far away that is "
-                        "— just report the clock time and day, as given.\n\n"
-                        "Reply with ONLY JSON, no other text:\n"
-                        '{"is_reminder": true or false, '
-                        '"reminder_text": "short description, or empty string", '
-                        '"time_type": "relative" or "absolute", '
-                        '"relative_minutes": integer or null, '
-                        '"absolute_hour": integer or null, '
-                        '"absolute_minute": integer or null, '
-                        '"days_from_today": integer or null}'
-                    )
-                },
-                {"role": "user", "content": text}
-            ],
-            max_completion_tokens=150,
-            temperature=0,
-            timeout=10,
-        )
-        content = response.choices[0].message.content
-        if not content:
-            return None
-        data = json.loads(content.strip())
-        if not data.get("is_reminder"):
-            return None
-        reminder_text = (data.get("reminder_text") or "").strip()
-        if not reminder_text:
-            return None
-
-        target_dt = _compute_reminder_datetime(data, utc_offset_minutes, now_utc_dt)
-        if target_dt is None:
-            return None
-
-        minutes_until = (target_dt - now_utc_dt).total_seconds() / 60
-        minutes_until = max(1, min(int(minutes_until), MAX_HOURS * 60))
-        return {"reminder_text": reminder_text, "minutes_until": minutes_until}
+        result = _extract_reminder(text, utc_offset_minutes, now_utc_dt, FAST_MODEL)
+        if result is not None:
+            return result
     except Exception as e:
-        logger.warning(f"detect_explicit_reminder failed, skipping: {e}")
+        logger.warning(f"detect_explicit_reminder: fast-model pass failed: {e}")
+
+    if not _looks_like_reminder_request(text):
+        return None
+
+    try:
+        logger.info("detect_explicit_reminder: fast-model miss on a likely reminder, retrying with flagship model")
+        return _extract_reminder(text, utc_offset_minutes, now_utc_dt, FLAGSHIP_MODEL)
+    except Exception as e:
+        logger.warning(f"detect_explicit_reminder: flagship retry failed, skipping: {e}")
         return None
 
 

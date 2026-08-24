@@ -9,6 +9,7 @@ import json
 from unittest.mock import patch
 
 from event_scheduler import detect_explicit_reminder, MAX_HOURS
+from memory import FAST_MODEL, FLAGSHIP_MODEL
 
 
 def _llm_json(**overrides):
@@ -106,3 +107,63 @@ def test_wildly_out_of_range_day_gets_clamped(mock_chat_completion):
                return_value=mock_chat_completion(content)):
         result = detect_explicit_reminder("remind me eventually", utc_offset_minutes=0)
     assert result["minutes_until"] == MAX_HOURS * 60
+
+
+# ============================================================
+# Fast-model miss on an obvious reminder retries once on the
+# flagship model. This is the real-world bug: Ollie's chat reply
+# (a separate model call) confidently promised a reminder for
+# "don't forget to remind me to drink water after 10 minutes
+# please", but this function's fast-model pass missed it -- no
+# row was ever scheduled, so nothing fired, with no signal to the
+# user that anything had gone wrong.
+# ============================================================
+
+def test_fast_model_miss_on_obvious_reminder_retries_and_succeeds(mock_chat_completion):
+    not_a_reminder = json.dumps({
+        "is_reminder": False, "reminder_text": "", "time_type": None,
+        "relative_minutes": None, "absolute_hour": None,
+        "absolute_minute": None, "days_from_today": None,
+    })
+    with patch("event_scheduler.openai_client.chat.completions.create") as mock_create:
+        mock_create.side_effect = [
+            mock_chat_completion(not_a_reminder),          # fast-model pass misses it
+            mock_chat_completion(_llm_json(reminder_text="drink water", relative_minutes=10)),  # retry catches it
+        ]
+        result = detect_explicit_reminder(
+            "now don't forget to remind me to drink water after 10 minutes please",
+            utc_offset_minutes=0,
+        )
+
+    assert result == {"reminder_text": "drink water", "minutes_until": 10}
+    assert mock_create.call_count == 2
+    assert mock_create.call_args_list[0].kwargs["model"] == FAST_MODEL
+    assert mock_create.call_args_list[1].kwargs["model"] == FLAGSHIP_MODEL
+
+
+def test_fast_model_miss_without_a_reminder_cue_does_not_retry(mock_chat_completion):
+    not_a_reminder = json.dumps({
+        "is_reminder": False, "reminder_text": "", "time_type": None,
+        "relative_minutes": None, "absolute_hour": None,
+        "absolute_minute": None, "days_from_today": None,
+    })
+    with patch("event_scheduler.openai_client.chat.completions.create",
+               return_value=mock_chat_completion(not_a_reminder)) as mock_create:
+        result = detect_explicit_reminder("how's the weather today", utc_offset_minutes=0)
+
+    assert result is None
+    mock_create.assert_called_once()  # ordinary messages shouldn't pay for a second call
+
+
+def test_both_passes_missing_still_returns_none_not_raises(mock_chat_completion):
+    not_a_reminder = json.dumps({
+        "is_reminder": False, "reminder_text": "", "time_type": None,
+        "relative_minutes": None, "absolute_hour": None,
+        "absolute_minute": None, "days_from_today": None,
+    })
+    with patch("event_scheduler.openai_client.chat.completions.create",
+               return_value=mock_chat_completion(not_a_reminder)) as mock_create:
+        result = detect_explicit_reminder("please remind me sometime maybe", utc_offset_minutes=0)
+
+    assert result is None
+    assert mock_create.call_count == 2
