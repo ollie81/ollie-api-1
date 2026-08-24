@@ -32,7 +32,8 @@ from datetime import datetime, timedelta, timezone
 from openai import OpenAI
 from config import OPENAI_API_KEY
 from database import supabase
-from memory import FAST_MODEL, FLAGSHIP_MODEL, CRISIS_KEYWORDS
+from memory import FAST_MODEL, FLAGSHIP_MODEL, CRISIS_KEYWORDS, moderate_text
+from personality import OLLIE_PERSONALITY
 from notification_service import NotificationService
 
 logger = logging.getLogger("ollie.event_scheduler")
@@ -389,6 +390,58 @@ def detect_explicit_reminder(text: str, utc_offset_minutes: int | None = None) -
         return None
 
 
+def _personalize_reminder(reminder_text: str) -> str:
+    """
+    Turns the bare extracted reminder ("drink water") into a line
+    that actually sounds like Ollie said it, not a flat label --
+    the notification is the only thing the user sees at the moment
+    the reminder fires, so it shouldn't read like a system alert.
+
+    Generated once, at schedule time rather than send time: keeps
+    run_due_notifications (which processes every due row for every
+    user in one sweep) fast and independent of OpenAI being up,
+    and this call is no different from the other LLM side-effects
+    (mood, goal, future-event detection) that already run
+    synchronously in the same chat turn before the reply returns.
+
+    Falls back to a simple templated line if generation or
+    moderation ever has an issue -- a slightly-less-charming
+    reminder beats a missing one.
+    """
+    fallback = f"hey — don't forget: {reminder_text}"
+    try:
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[{
+                "role": "system",
+                "content": f"""{OLLIE_PERSONALITY}
+
+You're sending a push notification delivering a reminder the user
+asked for earlier. Write ONE short, warm line (max 1 sentence) that
+delivers this reminder: "{reminder_text}"
+
+This is a notification, not a reply in a conversation -- no greeting,
+just the reminder itself, in your voice. No "As an AI", no corporate
+tone, no quotation marks around it."""
+            }],
+            max_completion_tokens=60,
+            temperature=1,
+            timeout=10,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if not content:
+            return fallback
+
+        if moderate_text(content):
+            logger.warning(f"_personalize_reminder: generated line flagged, using fallback for: {reminder_text}")
+            return fallback
+
+        return content
+    except Exception as e:
+        logger.warning(f"_personalize_reminder: generation failed, using fallback: {e}")
+        return fallback
+
+
 def maybe_schedule_reminder(user_id: str, message: str, utc_offset_minutes: int | None = None) -> None:
     try:
         reminder = detect_explicit_reminder(message, utc_offset_minutes)
@@ -402,6 +455,7 @@ def maybe_schedule_reminder(user_id: str, message: str, utc_offset_minutes: int 
         supabase.table("scheduled_events").insert({
             "user_id": user_id,
             "event_summary": reminder["reminder_text"],
+            "notification_body": _personalize_reminder(reminder["reminder_text"]),
             "topic_key": _topic_key(user_id, f"reminder:{reminder['reminder_text']}:{scheduled_for}"),
             "scheduled_for": scheduled_for,
             "status": "pending",
@@ -462,7 +516,12 @@ def run_due_notifications() -> None:
 
                 if kind == "reminder":
                     title = "Ollie reminding you"
-                    body = event_summary
+                    # notification_body is the personality-voiced
+                    # line generated at schedule time (see
+                    # _personalize_reminder) -- event_summary stays
+                    # the raw text, only as a fallback for rows
+                    # scheduled before that column existed.
+                    body = row.get("notification_body") or event_summary
                 else:
                     title = "Ollie checking in"
                     body = f"hey — how did it go with {event_summary}?"
