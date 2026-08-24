@@ -56,6 +56,7 @@ class SignupRequest(BaseModel):
     phone_number: str
     password: str
     otp: str
+    date_of_birth: str | None = None  # "YYYY-MM-DD" — optional so older app builds that don't send it yet keep working
 
 class ForgotRequest(BaseModel):
     phone_number: str
@@ -143,6 +144,31 @@ def send_direct_sms(to: str, body: str):
         return {"success": False, "error": str(e)}
 
 # ============================================================
+# AGE GATE
+# ============================================================
+# No date_of_birth is allowed through (older app builds don't
+# collect one yet), but if one IS sent, it must parse and clear
+# the COPPA-standard 13-year bar. A malformed value is rejected
+# rather than ignored, so garbage input can't be used to slip
+# past this — the only way through is a real, valid, adult-enough
+# date, or no date at all.
+MIN_SIGNUP_AGE_YEARS = 13
+
+def _check_age_gate(date_of_birth: str | None) -> str | None:
+    """Returns an error detail string if signup should be blocked, else None."""
+    if not date_of_birth:
+        return None
+    try:
+        dob = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
+    except ValueError:
+        return "Invalid date_of_birth format, expected YYYY-MM-DD"
+    today = datetime.utcnow().date()
+    age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+    if age < MIN_SIGNUP_AGE_YEARS:
+        return f"You must be at least {MIN_SIGNUP_AGE_YEARS} years old to create an account"
+    return None
+
+# ============================================================
 # AUTH ROUTES
 # ============================================================
 
@@ -186,6 +212,10 @@ def signup(req: SignupRequest, request: Request):
         if existing.data:
             raise HTTPException(status_code=400, detail="User already exists")
 
+        age_gate_error = _check_age_gate(req.date_of_birth)
+        if age_gate_error:
+            raise HTTPException(status_code=400, detail=age_gate_error)
+
         verification_check = twilio_client.verify.services(TWILIO_VERIFY_SERVICE_SID) \
             .verification_checks \
             .create(to=req.phone_number, code=req.otp)
@@ -194,11 +224,14 @@ def signup(req: SignupRequest, request: Request):
             raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
         hashed = hash_password(req.password)
-        result = supabase.table("users").insert({
+        user_data = {
             "username": req.phone_number,
             "phone": req.phone_number,
-            "password_hash": hashed
-        }).execute()
+            "password_hash": hashed,
+        }
+        if req.date_of_birth:
+            user_data["date_of_birth"] = req.date_of_birth
+        result = supabase.table("users").insert(user_data).execute()
 
         user = result.data[0]
         user_id = user["id"]
