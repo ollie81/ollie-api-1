@@ -94,3 +94,32 @@ def test_exhausts_retries_and_fails_closed_under_perpetual_contention():
 
         assert OllieDB().try_consume_voice_trial("user-1", "hey") is False
         assert _update_chain(mock_supabase).call_count == 5
+
+
+# ============================================================
+# get_voice_trial_remaining -- read-only, no race-condition
+# concern like the consume method above (nothing is written).
+# ============================================================
+
+def test_remaining_for_a_fresh_user_is_the_full_limit():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": 0})
+        assert OllieDB().get_voice_trial_remaining("user-1") == TRIAL_VOICE_SECONDS_LIMIT
+
+
+def test_remaining_subtracts_seconds_already_used():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": 45})
+        assert OllieDB().get_voice_trial_remaining("user-1") == TRIAL_VOICE_SECONDS_LIMIT - 45
+
+
+def test_remaining_never_goes_negative():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": TRIAL_VOICE_SECONDS_LIMIT + 20})
+        assert OllieDB().get_voice_trial_remaining("user-1") == 0
+
+
+def test_remaining_defaults_to_full_limit_when_field_missing():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({})
+        assert OllieDB().get_voice_trial_remaining("user-1") == TRIAL_VOICE_SECONDS_LIMIT

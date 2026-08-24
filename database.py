@@ -429,6 +429,20 @@ class OllieDB:
         # rather than risk over-granting.
         return False
 
+    def get_voice_trial_remaining(self, user_id: str) -> int:
+        """
+        Read-only -- no race-condition concern like try_consume_voice_trial
+        above, this is purely for display (e.g. a "you have 47s left"
+        indicator client-side).
+        """
+        result = self.supabase.table("users") \
+            .select("voice_trial_seconds_used") \
+            .eq("id", user_id) \
+            .single() \
+            .execute()
+        used = (result.data or {}).get("voice_trial_seconds_used") or 0
+        return max(0, TRIAL_VOICE_SECONDS_LIMIT - used)
+
     def has_active_ad_bonus(self, user_id: str) -> bool:
         row = self._get_usage_row(user_id)
         if row and row.get("ad_bonus_until"):
