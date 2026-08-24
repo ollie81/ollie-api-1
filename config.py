@@ -47,7 +47,15 @@ PAPLA_TTS_URL = "https://api.papla.media/v1/text-to-speech"
 
 GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON")
 ANDROID_PACKAGE_NAME = os.getenv("ANDROID_PACKAGE_NAME", "com.example.ollie_app")
-PLAY_SUBSCRIPTION_PRODUCT_ID = os.getenv("PLAY_SUBSCRIPTION_PRODUCT_ID")
+
+# The Flutter client owns the full set of product IDs (monthly,
+# yearly, lifetime -- see purchase_service.dart) and passes whichever
+# one was purchased straight through to /activate for verification.
+# The backend only needs its own copy of the lifetime ID, since
+# that's a one-time managed product verified via a different Play
+# Developer API than the two auto-renewing subscriptions.
+PLAY_MONTHLY_PRODUCT_ID = os.getenv("PLAY_MONTHLY_PRODUCT_ID", "ollie_premium_monthly")
+PLAY_LIFETIME_PRODUCT_ID = os.getenv("PLAY_LIFETIME_PRODUCT_ID", "ollie_premium_lifetime")
 
 # ============================================================
 # CORS
