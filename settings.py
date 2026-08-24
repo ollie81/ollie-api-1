@@ -45,6 +45,11 @@ def get_usage(current_user: dict = Depends(get_current_user)):
             "has_active_ad_bonus": has_bonus,
             "is_premium": is_premium,
             "current_streak": current_streak,
+            # Same "unset/null defaults to enabled" convention as
+            # NotificationService.create_notification's own check --
+            # current_user is the full row (get_current_user selects
+            # "*"), so this is free, no extra query.
+            "notifications_enabled": current_user.get("notifications_enabled") is not False,
         }
     except Exception as e:
         logger.error(f"get_usage failed for user {current_user.get('id')}: {e}")
