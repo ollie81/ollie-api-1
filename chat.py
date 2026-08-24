@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from openai import OpenAI
@@ -68,15 +68,39 @@ class SpeakRequest(BaseModel):
 # PROMPT BUILDER
 # ============================================================
 
-def build_system_prompt(language: str, memory_block: str) -> str:
+def _current_time_line(utc_offset_minutes: int | None) -> str:
     """
-    Structure: PERSONALITY → MEMORY → LANGUAGE RULE → HARD RULES
+    Ollie previously had zero notion of the current time or date
+    — asked "what time is it", the model had nothing to go on and
+    could only guess or deflect. This gives it the real answer,
+    in the user's own local time when known (same utc_offset_minutes
+    already sent for reminder scheduling).
+    """
+    now_utc = datetime.now(timezone.utc)
+    if utc_offset_minutes is not None:
+        local_dt = now_utc + timedelta(minutes=utc_offset_minutes)
+        return (
+            f"CURRENT TIME: it's {local_dt.strftime('%A, %B %d, %Y, %I:%M %p').replace(' 0', ' ')} "
+            "where the user is right now. If asked what time or day it is, just answer — "
+            "never say you don't know or can't tell."
+        )
+    return (
+        f"CURRENT TIME (UTC — user's local timezone wasn't sent this turn): "
+        f"{now_utc.strftime('%A, %B %d, %Y, %I:%M %p').replace(' 0', ' ')} UTC."
+    )
+
+
+def build_system_prompt(language: str, memory_block: str, utc_offset_minutes: int | None = None) -> str:
+    """
+    Structure: PERSONALITY → MEMORY → TIME → LANGUAGE RULE → HARD RULES
     Memory injected before rules are finalized.
     """
     parts = [OLLIE_PERSONALITY]
 
     if memory_block:
         parts.append(f"\n{memory_block}")
+
+    parts.append(f"\n{_current_time_line(utc_offset_minutes)}")
 
     parts.append(f"""
 LANGUAGE RULE:
@@ -105,6 +129,7 @@ def get_ollie_response(
     server_history: list,
     memory_block: str,
     model: str,
+    utc_offset_minutes: int | None = None,
     max_retries: int = 2,
 ) -> str:
     """
@@ -114,7 +139,7 @@ def get_ollie_response(
     logged with which model and attempt number, so real outages
     are visible instead of silently producing generic replies.
     """
-    system_prompt = build_system_prompt(language, memory_block)
+    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes)
 
     messages = [{"role": "system", "content": system_prompt}]
     messages += server_history
@@ -261,7 +286,7 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         db.increment_message_count(user_id)
 
         # Get response
-        reply = get_ollie_response(req.message, language, server_history, prompt_context, model)
+        reply = get_ollie_response(req.message, language, server_history, prompt_context, model, req.utc_offset_minutes)
 
         output_moderation = moderate_text(reply)
         if output_moderation:
