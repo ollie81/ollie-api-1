@@ -27,6 +27,7 @@ def _run(user_row, subscription_rows=None):
         mock_db_cls.return_value.get_messages_today.return_value = 3
         mock_db_cls.return_value.has_active_ad_bonus.return_value = False
         mock_db_cls.return_value.get_streak.return_value = 2
+        mock_db_cls.return_value.get_voice_trial_remaining.return_value = 42
         mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = \
             _mock_result(subscription_rows or [])
         return get_usage(current_user=user_row)
@@ -56,4 +57,5 @@ def test_other_usage_fields_still_present():
     assert result["daily_limit"] == 20
     assert result["has_active_ad_bonus"] is False
     assert result["current_streak"] == 2
+    assert result["voice_trial_seconds_remaining"] == 42
     assert result["is_premium"] is True

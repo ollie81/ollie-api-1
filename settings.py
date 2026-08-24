@@ -31,6 +31,7 @@ def get_usage(current_user: dict = Depends(get_current_user)):
         messages_today = db.get_messages_today(user_id)
         has_bonus = db.has_active_ad_bonus(user_id)
         current_streak = db.get_streak(user_id)
+        voice_trial_seconds_remaining = db.get_voice_trial_remaining(user_id)
 
         premium_result = supabase.table("subscriptions") \
             .select("id") \
@@ -45,6 +46,7 @@ def get_usage(current_user: dict = Depends(get_current_user)):
             "has_active_ad_bonus": has_bonus,
             "is_premium": is_premium,
             "current_streak": current_streak,
+            "voice_trial_seconds_remaining": voice_trial_seconds_remaining,
             # Same "unset/null defaults to enabled" convention as
             # NotificationService.create_notification's own check --
             # current_user is the full row (get_current_user selects

@@ -493,11 +493,20 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
     # then it's premium-only.
     db = OllieDB()
     user_id = current_user["id"]
-    if not is_premium_active(user_id) and not db.try_consume_voice_trial(user_id, req.message):
+    is_premium = is_premium_active(user_id)
+    if not is_premium and not db.try_consume_voice_trial(user_id, req.message):
         raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
 
     audio = _synthesize_speech(req.message)
-    return Response(content=audio, media_type="audio/mpeg")
+
+    # Lets the client show a live "X seconds left" indicator without
+    # a separate round-trip -- headers ride along with the binary
+    # audio body for free. Omitted for premium (nothing to count).
+    headers = {}
+    if not is_premium:
+        headers["X-Voice-Trial-Remaining-Seconds"] = str(db.get_voice_trial_remaining(user_id))
+
+    return Response(content=audio, media_type="audio/mpeg", headers=headers)
 
 
 # ============================================================
