@@ -23,3 +23,39 @@ os.environ.setdefault("TWILIO_ACCOUNT_SID", "test-sid-not-real")
 os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-token-not-real")
 os.environ.setdefault("TWILIO_VERIFY_SERVICE_SID", "test-verify-sid-not-real")
 os.environ.setdefault("TWILIO_PHONE_NUMBER", "+10000000000")
+
+import pytest
+from unittest.mock import MagicMock
+
+
+@pytest.fixture
+def mock_chat_completion():
+    """
+    Factory fixture: call it with a JSON string (or None, for the
+    "empty response" case) to get an object shaped like what
+    `openai_client.chat.completions.create(...)` returns, so code
+    that reads `response.choices[0].message.content` works against
+    it without a real network call.
+    """
+    def _make(content):
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = content
+        return response
+    return _make
+
+
+@pytest.fixture
+def mock_moderation_response():
+    """
+    Same idea for `openai_client.moderations.create(...)` — reads
+    `response.results[0].flagged` and
+    `response.results[0].categories.model_dump()`.
+    """
+    def _make(flagged: bool, categories: dict):
+        response = MagicMock()
+        response.results = [MagicMock()]
+        response.results[0].flagged = flagged
+        response.results[0].categories.model_dump.return_value = categories
+        return response
+    return _make
