@@ -16,6 +16,7 @@ from chat import router as chat_router
 from premium import router as premium_router
 from notifications import router as notifications_router
 from event_scheduler import run_due_notifications
+from daily_message import send_daily_messages
 from settings import router as settings_router
 # ============================================================
 # SCHEDULER — checks for due event check-ins periodically, and
@@ -23,6 +24,7 @@ from settings import router as settings_router
 # ============================================================
 background_scheduler = BackgroundScheduler()
 background_scheduler.add_job(run_due_notifications, "interval", minutes=10)
+background_scheduler.add_job(send_daily_messages, "interval", minutes=15)
 background_scheduler.add_job(cleanup_expired_refresh_tokens, "interval", hours=24)
 
 

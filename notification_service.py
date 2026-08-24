@@ -152,12 +152,17 @@ class NotificationService:
         try:
             user = (
                 supabase.table("users")
-                .select("fcm_token")
+                .select("fcm_token, notifications_enabled")
                 .eq("id", user_id)
                 .single()
                 .execute()
             )
-            if user.data:
+            # notifications_enabled defaults to unset/true for
+            # existing users who've never touched the toggle in
+            # Settings -- only an explicit False should suppress
+            # the push. The in-app notification row above is saved
+            # either way, so it's still visible in-app.
+            if user.data and user.data.get("notifications_enabled") is not False:
                 token = user.data.get("fcm_token")
                 if token:
                     send_push(token, title, body)
