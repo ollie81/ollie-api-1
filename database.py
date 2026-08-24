@@ -324,13 +324,59 @@ class OllieDB:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
 
-    def can_send_message(self, user_id: str, limit: int = 20) -> bool:
-        row = self._get_usage_row(user_id)
-        if row and row.get("ad_bonus_until"):
-            if self._parse_utc(row["ad_bonus_until"]) > datetime.now(timezone.utc):
-                return True  # active ad-bonus window, unlimited for now
-        count = row.get("count", 0) if row else 0
-        return count < limit
+    def try_consume_message(self, user_id: str, limit: int = 20) -> bool:
+        """
+        Atomically checks-and-increments the free-tier daily message
+        count in one step. A plain read-then-write (check the count,
+        then separately increment it) lets two concurrent requests
+        both read the same count and both pass, since neither sees
+        the other's increment before making its own decision -- this
+        instead only applies the increment if the count still
+        matches what was just read (optimistic concurrency), so a
+        losing request notices and retries against the fresh value
+        instead of silently over-granting.
+
+        Returns False (count left untouched) once the limit is hit.
+        Callers that already know the user is premium should call
+        increment_message_count directly instead -- this always
+        enforces limit, it doesn't know about premium itself (same
+        split as before).
+        """
+        today = date.today().isoformat()
+
+        for _ in range(5):
+            row = self._get_usage_row(user_id)
+
+            if row and row.get("ad_bonus_until"):
+                if self._parse_utc(row["ad_bonus_until"]) > datetime.now(timezone.utc):
+                    return True  # active ad-bonus window, unlimited -- nothing to track
+
+            if not row:
+                try:
+                    self.supabase.table("message_usage").insert({
+                        "user_id": user_id, "date": today, "count": 1,
+                    }).execute()
+                    return True
+                except Exception:
+                    continue  # someone else's insert for today already landed -- re-read and retry
+
+            count = row.get("count", 0)
+            if count >= limit:
+                return False
+
+            result = self.supabase.table("message_usage") \
+                .update({"count": count + 1}) \
+                .eq("user_id", user_id) \
+                .eq("date", today) \
+                .eq("count", count) \
+                .execute()
+            if result.data:
+                return True
+            # else: count changed under us since the read above -- someone else incremented first, retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
 
     def has_active_ad_bonus(self, user_id: str) -> bool:
         row = self._get_usage_row(user_id)
