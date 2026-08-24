@@ -252,28 +252,32 @@ def build_memory_context(memories: list, context: dict) -> str:
             reverse=True
         )[:10]
 
-        if sorted_memories:
+        memory_lines = []
+        for m in sorted_memories:
+            if not isinstance(m, dict):
+                continue
+            text = (m.get("memory_text") or "").strip()
+            if text:
+                memory_lines.append(f"  - {text}")
+        if memory_lines:
             parts.append("USER MEMORY:")
-            for m in sorted_memories:
-                if not isinstance(m, dict):
-                    continue
-                text = (m.get("memory_text") or "").strip()
-                if text:
-                    parts.append(f"  - {text}")
+            parts.extend(memory_lines)
 
         today_mood = context.get("today_mood")
         if today_mood and isinstance(today_mood, dict) and today_mood.get("mood"):
             parts.append(f"MOOD TODAY: {today_mood['mood']}")
 
-        active_goals = context.get("active_goals")
-        if active_goals:
+        active_goals = context.get("active_goals") or []
+        goal_lines = []
+        for g in active_goals:
+            if not isinstance(g, dict):
+                continue
+            title = (g.get("title") or "").strip()
+            if title:
+                goal_lines.append(f"  - {title}")
+        if goal_lines:
             parts.append("ACTIVE GOALS:")
-            for g in active_goals:
-                if not isinstance(g, dict):
-                    continue
-                title = (g.get("title") or "").strip()
-                if title:
-                    parts.append(f"  - {title}")
+            parts.extend(goal_lines)
 
         return "\n".join(parts) if parts else ""
 
