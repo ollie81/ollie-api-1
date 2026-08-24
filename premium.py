@@ -49,16 +49,24 @@ def _get_play_service():
     return build("androidpublisher", "v3", credentials=creds)
 
 
-@router.get("/status")
-def premium_status(current_user: dict = Depends(get_current_user)):
+def is_premium_active(user_id: str) -> bool:
+    """
+    The real premium check — used by the /status route below, and
+    by anything else that needs to gate a feature on subscription
+    status (e.g. voice, which is premium-only). Re-verifies with
+    Play directly when the locally stored expiry has passed, rather
+    than trusting a possibly-stale local timestamp; fails open on
+    any verification error so an infra hiccup never strands a
+    paying user.
+    """
     result = supabase.table("subscriptions") \
         .select("*") \
-        .eq("user_id", current_user["id"]) \
+        .eq("user_id", user_id) \
         .eq("status", "active") \
         .execute()
 
     if not result.data:
-        return {"is_premium": False}
+        return False
 
     sub = result.data[0]
     expiry_ms = sub.get("expiry_time_millis") or 0
@@ -66,7 +74,7 @@ def premium_status(current_user: dict = Depends(get_current_user)):
 
     # No expiry on record (legacy row), or not yet expired — active.
     if expiry_ms <= 0 or now_ms < expiry_ms:
-        return {"is_premium": True}
+        return True
 
     # Locally stored expiry has passed. That could mean the sub
     # genuinely ended, or it auto-renewed on Google's side and we
@@ -90,17 +98,22 @@ def premium_status(current_user: dict = Depends(get_current_user)):
             "expiry_time_millis": new_expiry_ms,
         }).eq("id", sub["id"]).execute()
 
-        return {"is_premium": still_active}
+        return still_active
 
     except Exception as e:
         # Can't confirm either way (misconfigured creds, network,
         # quota) — fail open rather than cutting off a paying user
         # over an infra hiccup.
         logger.warning(
-            f"premium_status: Play re-verification failed for user "
-            f"{current_user['id']}, treating as still active: {e}"
+            f"is_premium_active: Play re-verification failed for user "
+            f"{user_id}, treating as still active: {e}"
         )
-        return {"is_premium": True}
+        return True
+
+
+@router.get("/status")
+def premium_status(current_user: dict = Depends(get_current_user)):
+    return {"is_premium": is_premium_active(current_user["id"])}
 
 
 @router.post("/activate")

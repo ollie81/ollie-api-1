@@ -4,13 +4,16 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from openai import OpenAI
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import List
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from config import OPENAI_API_KEY, PAPLA_API_KEY, OLLIE_VOICE_ID, PAPLA_TTS_URL
 from database import OllieDB, supabase
+from premium import is_premium_active
 from memory import (
     detect_language,
     build_memory_context,
@@ -31,6 +34,7 @@ logger = logging.getLogger("ollie.chat")
 
 router = APIRouter()
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.get("/history")
@@ -234,6 +238,105 @@ def _flag_moderation(user_id: str, direction: str, text: str, categories: list) 
         logger.warning(f"chat: could not record moderation_flags row (table may not exist yet): {e}")
 
 # ============================================================
+# CHAT PIPELINE — shared by the text (/chat) and voice
+# (/chat/voice) entry points. Callers own their own entry
+# validation (empty-message checks, daily limits, premium
+# gating) before calling this.
+# ============================================================
+
+def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None) -> dict:
+    session_id = db.get_or_create_session(user_id)
+
+    # Detect language
+    language = detect_language(message)
+
+    # Moderation — audit trail only, never blocks the reply.
+    input_moderation = moderate_text(message)
+    if input_moderation:
+        _flag_moderation(user_id, "input", message, input_moderation["categories"])
+
+    # Get memories + context
+    memories = db.get_relevant_memories(user_id)
+    context = db.get_user_context(user_id)
+    memory_block = build_memory_context(memories, context)
+
+    # Rebuild clean history server-side — fixes amnesia
+    raw_history = db.get_recent_messages(user_id, limit=12)
+    server_history = clean_history(raw_history)
+
+    # Decide which model handles this turn — based on the
+    # original memory block only (facts/mood/goals). Interests
+    # are deliberately excluded from this decision, since they
+    # populate quickly for active users and would otherwise push
+    # almost every message onto the flagship model.
+    model = pick_chat_model(language, message, memory_block)
+
+    # Interest memory — separate, additive system. Added to the
+    # PROMPT CONTEXT only, after routing is already decided, so
+    # it enriches Ollie's replies without affecting cost/routing.
+    interest_block = build_interest_context(user_id)
+    prompt_context = f"{memory_block}\n{interest_block}" if interest_block else memory_block
+
+    # Save user message
+    db.save_message(user_id, session_id, message, "user")
+    db.increment_message_count(user_id)
+
+    # Get response
+    reply = get_ollie_response(message, language, server_history, prompt_context, model, utc_offset_minutes)
+
+    output_moderation = moderate_text(reply)
+    if output_moderation:
+        _flag_moderation(user_id, "output", reply, output_moderation["categories"])
+
+    # Crisis backstop — guarantee a resource line on flagged
+    # messages regardless of whether the model included one.
+    if _is_crisis_message(message):
+        _flag_crisis_message(user_id, message)
+        reply = reply.rstrip() + (
+            "\n\nif it ever feels like too much, please reach out to "
+            "a crisis line or someone you trust — i'm not going anywhere either."
+        )
+
+    # Save Ollie reply
+    db.save_message(user_id, session_id, reply, "ollie", 0.0)
+
+    # Save memory with importance scoring
+    memory_text, importance = extract_memory_worthy(message)
+    if memory_text:
+        db.save_memory(user_id, memory_text, importance=importance)
+
+    # Update today's mood if this message clearly conveys one —
+    # feeds the "MOOD TODAY" block back into tomorrow's context.
+    mood = detect_mood(message)
+    if mood:
+        db.update_mood(user_id, mood)
+
+    # Save a goal if one was clearly expressed — feeds the
+    # "ACTIVE GOALS" block back into future context.
+    goal = extract_goal(message)
+    if goal:
+        db.save_goal(user_id, goal)
+
+    # Check if this message describes a meaningful future event
+    # (interview, exam, first date, deadline, family event —
+    # anything, not just medical) worth a genuine check-in later.
+    # This only SCHEDULES a future notification — it does not send
+    # one now. Only runs on already-important, non-crisis messages,
+    # so it doesn't fire on every mention of a date/time.
+    maybe_schedule_event(user_id, message, importance)
+
+    # Explicit "remind me to X" requests — independent of the
+    # importance gate above, since a reminder request may not
+    # score as memory-worthy on its own.
+    maybe_schedule_reminder(user_id, message, utc_offset_minutes)
+
+    # Track ongoing interests/hobbies mentioned — separate,
+    # additive system. Failure here never breaks the reply.
+    maybe_track_interest(user_id, message)
+
+    return {"reply": reply, "language": language, "model_used": model}
+
+# ============================================================
 # CHAT ROUTE
 # ============================================================
 
@@ -249,97 +352,7 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
-        session_id = db.get_or_create_session(user_id)
-
-        # Detect language
-        language = detect_language(req.message)
-
-        # Moderation — audit trail only, never blocks the reply.
-        input_moderation = moderate_text(req.message)
-        if input_moderation:
-            _flag_moderation(user_id, "input", req.message, input_moderation["categories"])
-
-        # Get memories + context
-        memories = db.get_relevant_memories(user_id)
-        context = db.get_user_context(user_id)
-        memory_block = build_memory_context(memories, context)
-
-        # Rebuild clean history server-side — fixes amnesia
-        raw_history = db.get_recent_messages(user_id, limit=12)
-        server_history = clean_history(raw_history)
-
-        # Decide which model handles this turn — based on the
-        # original memory block only (facts/mood/goals). Interests
-        # are deliberately excluded from this decision, since they
-        # populate quickly for active users and would otherwise push
-        # almost every message onto the flagship model.
-        model = pick_chat_model(language, req.message, memory_block)
-
-        # Interest memory — separate, additive system. Added to the
-        # PROMPT CONTEXT only, after routing is already decided, so
-        # it enriches Ollie's replies without affecting cost/routing.
-        interest_block = build_interest_context(user_id)
-        prompt_context = f"{memory_block}\n{interest_block}" if interest_block else memory_block
-
-        # Save user message
-        db.save_message(user_id, session_id, req.message, "user")
-        db.increment_message_count(user_id)
-
-        # Get response
-        reply = get_ollie_response(req.message, language, server_history, prompt_context, model, req.utc_offset_minutes)
-
-        output_moderation = moderate_text(reply)
-        if output_moderation:
-            _flag_moderation(user_id, "output", reply, output_moderation["categories"])
-
-        # Crisis backstop — guarantee a resource line on flagged
-        # messages regardless of whether the model included one.
-        if _is_crisis_message(req.message):
-            _flag_crisis_message(user_id, req.message)
-            reply = reply.rstrip() + (
-                "\n\nif it ever feels like too much, please reach out to "
-                "a crisis line or someone you trust — i'm not going anywhere either."
-            )
-
-        # Save Ollie reply
-        db.save_message(user_id, session_id, reply, "ollie", 0.0)
-
-        # Save memory with importance scoring
-        memory_text, importance = extract_memory_worthy(req.message)
-        if memory_text:
-            db.save_memory(user_id, memory_text, importance=importance)
-
-        # Update today's mood if this message clearly conveys one —
-        # feeds the "MOOD TODAY" block back into tomorrow's context.
-        mood = detect_mood(req.message)
-        if mood:
-            db.update_mood(user_id, mood)
-
-        # Save a goal if one was clearly expressed — feeds the
-        # "ACTIVE GOALS" block back into future context.
-        goal = extract_goal(req.message)
-        if goal:
-            db.save_goal(user_id, goal)
-
-        # Check if this message describes a meaningful future event
-        # (interview, exam, first date, deadline, family event —
-        # anything, not just medical) worth a genuine check-in later.
-        # This only SCHEDULES a future notification — it does not send
-        # one now. Only runs on already-important, non-crisis messages,
-        # so it doesn't fire on every mention of a date/time.
-        maybe_schedule_event(user_id, req.message, importance)
-
-        # Explicit "remind me to X" requests — independent of the
-        # importance gate above, since a reminder request may not
-        # score as memory-worthy on its own.
-        maybe_schedule_reminder(user_id, req.message, req.utc_offset_minutes)
-
-        # Track ongoing interests/hobbies mentioned — separate,
-        # additive system. Failure here never breaks the reply.
-        maybe_track_interest(user_id, req.message)
-
-        return {"reply": reply, "language": language, "model_used": model}
-
+        return _process_chat_message(db, user_id, req.message, req.utc_offset_minutes)
     except HTTPException:
         raise
     except Exception as e:
@@ -347,20 +360,67 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Something went wrong, please try again")
 
 # ============================================================
-# SPEAK ROUTE — streams directly, no file saving
+# VOICE CHAT ROUTE — record a voice message, get a real spoken-
+# to-text-to-Ollie reply back. Premium-only (see is_premium_active
+# in premium.py) — voice costs real money per use (Whisper +
+# Papla), unlike text.
 # ============================================================
 
-@router.post("/speak")
-def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
+@router.post("/chat/voice")
+async def chat_voice(
+    audio: UploadFile = File(...),
+    utc_offset_minutes: int | None = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
     db = OllieDB()
     user_id = current_user["id"]
 
-    if not req.message or not req.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    if not is_premium_active(user_id):
+        raise HTTPException(status_code=402, detail="Voice chat requires Ollie Premium")
 
-    if not db.can_use_voice(user_id):
-        raise HTTPException(status_code=429, detail="Voice limit reached")
+    try:
+        audio_bytes = await audio.read()
+    except Exception as e:
+        logger.warning(f"chat_voice: failed to read upload for user {user_id}: {e}")
+        raise HTTPException(status_code=400, detail="Could not read audio file")
 
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
+    try:
+        transcription = openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(audio.filename or "voice.m4a", audio_bytes),
+        )
+        transcribed_text = (transcription.text or "").strip()
+    except Exception as e:
+        logger.error(f"chat_voice: transcription failed for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Could not transcribe audio, please try again")
+
+    if not transcribed_text:
+        raise HTTPException(status_code=400, detail="Couldn't hear anything in that recording")
+
+    try:
+        result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"chat_voice route failed for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong, please try again")
+
+    result["transcribed_text"] = transcribed_text
+    return result
+
+# ============================================================
+# SPEAK ROUTE — streams directly, no file saving
+# ============================================================
+
+def _synthesize_speech(text: str) -> bytes:
+    """
+    Calls Papla TTS with retry and returns the raw audio bytes.
+    Raises HTTPException(500) itself on failure, so callers don't
+    need their own error handling around this.
+    """
     if not PAPLA_API_KEY or not OLLIE_VOICE_ID:
         raise HTTPException(status_code=500, detail="Voice not configured")
 
@@ -371,7 +431,7 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
         "Authorization": f"Bearer {PAPLA_API_KEY}"
     }
     data = {
-        "text": req.message,
+        "text": text,
         "model_id": "papla_p1",
         "voice_settings": {
             "stability": 0.5,
@@ -385,17 +445,48 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
         try:
             response = requests.post(url, json=data, headers=headers, timeout=15)
             if response.status_code == 200:
-                return Response(content=response.content, media_type="audio/mpeg")
+                return response.content
 
-            logger.warning(f"speak: Papla returned {response.status_code} on attempt {attempt + 1}")
+            logger.warning(f"_synthesize_speech: Papla returned {response.status_code} on attempt {attempt + 1}")
             last_error = f"Papla returned status {response.status_code}"
 
         except requests.RequestException as e:
             last_error = str(e)
-            logger.warning(f"speak: request to Papla failed on attempt {attempt + 1}: {e}")
+            logger.warning(f"_synthesize_speech: request to Papla failed on attempt {attempt + 1}: {e}")
 
         if attempt < max_retries:
             time.sleep(0.5)
 
-    logger.error(f"speak: voice generation failed for user {user_id} after retries: {last_error}")
+    logger.error(f"_synthesize_speech: voice generation failed after retries: {last_error}")
     raise HTTPException(status_code=500, detail="Voice generation failed")
+
+
+@router.post("/speak")
+def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
+    if not req.message or not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    # Voice costs real money per use (Papla TTS) — premium-only,
+    # not a free daily allowance like it used to be.
+    if not is_premium_active(current_user["id"]):
+        raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
+
+    audio = _synthesize_speech(req.message)
+    return Response(content=audio, media_type="audio/mpeg")
+
+
+# ============================================================
+# VOICE PREVIEW — a short, free, fixed sample of Ollie's voice,
+# so someone can hear what they'd be paying for before deciding.
+# Deliberately NOT user-controllable text (always this one line)
+# and rate-limited, so it can't be used as a free-TTS workaround.
+# ============================================================
+
+VOICE_PREVIEW_TEXT = "hey — it's ollie. this is what i actually sound like."
+
+
+@router.post("/speak/preview")
+@limiter.limit("3/day")
+def speak_preview(request: Request, current_user: dict = Depends(get_current_user)):
+    audio = _synthesize_speech(VOICE_PREVIEW_TEXT)
+    return Response(content=audio, media_type="audio/mpeg")

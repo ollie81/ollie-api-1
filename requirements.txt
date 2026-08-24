@@ -82,3 +82,4 @@ bcrypt
 slowapi
 apscheduler
 twilio
+python-multipart
