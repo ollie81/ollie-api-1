@@ -486,9 +486,14 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # Voice costs real money per use (Papla TTS) — premium-only,
-    # not a free daily allowance like it used to be.
-    if not is_premium_active(current_user["id"]):
+    # Voice costs real money per use (Papla TTS). Premium is
+    # unlimited; everyone else gets a one-time ~60-second trial
+    # (across however many messages they tap the speaker icon on)
+    # so they can hear Ollie speak real replies before deciding,
+    # then it's premium-only.
+    db = OllieDB()
+    user_id = current_user["id"]
+    if not is_premium_active(user_id) and not db.try_consume_voice_trial(user_id, req.message):
         raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
 
     audio = _synthesize_speech(req.message)

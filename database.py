@@ -18,6 +18,16 @@ MAX_AD_WATCHES_PER_DAY = 3
 # the common analytics-industry default (e.g. Google Analytics).
 SESSION_GAP_MINUTES = 30
 
+# Free lifetime voice trial -- "hear Ollie speak real replies"
+# rather than the fixed canned /speak/preview line, capped so it
+# stays a taste rather than an ongoing free tier.
+TRIAL_VOICE_SECONDS_LIMIT = 60
+
+# Rough estimate of spoken characters per second (~150 wpm, ~6
+# chars/word including the space) -- good enough for budgeting a
+# one-time trial, not meant to be exact.
+ESTIMATED_CHARS_PER_SECOND = 15
+
 class OllieDB:
     def __init__(self):
         self.supabase = supabase
@@ -373,6 +383,47 @@ class OllieDB:
             if result.data:
                 return True
             # else: count changed under us since the read above -- someone else incremented first, retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
+
+    def try_consume_voice_trial(self, user_id: str, text: str) -> bool:
+        """
+        Atomic check-and-consume against the free lifetime voice
+        trial (TRIAL_VOICE_SECONDS_LIMIT), same optimistic-
+        concurrency shape as try_consume_message -- an estimated
+        duration is deducted, but only if the running total still
+        matches what was just read, so two taps in quick succession
+        can't both read the same remaining budget and both pass.
+
+        Returns False (nothing consumed) if the estimated duration
+        would exceed the remaining budget -- including when it's
+        already exhausted. Callers should only call this for
+        non-premium users; it always enforces the trial cap, it
+        doesn't know about premium itself.
+        """
+        estimated_seconds = max(1, round(len(text) / ESTIMATED_CHARS_PER_SECOND))
+
+        for _ in range(5):
+            result = self.supabase.table("users") \
+                .select("voice_trial_seconds_used") \
+                .eq("id", user_id) \
+                .single() \
+                .execute()
+            used = (result.data or {}).get("voice_trial_seconds_used") or 0
+
+            if used + estimated_seconds > TRIAL_VOICE_SECONDS_LIMIT:
+                return False
+
+            update_result = self.supabase.table("users") \
+                .update({"voice_trial_seconds_used": used + estimated_seconds}) \
+                .eq("id", user_id) \
+                .eq("voice_trial_seconds_used", used) \
+                .execute()
+            if update_result.data:
+                return True
+            # else: used changed under us since the read above -- someone else consumed first, retry
 
         # Heavy contention exhausted the retry budget -- fail closed
         # rather than risk over-granting.
