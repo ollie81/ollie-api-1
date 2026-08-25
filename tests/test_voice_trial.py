@@ -1,14 +1,21 @@
 # ============================================================
 # Tests for OllieDB.try_consume_voice_trial -- the free one-time
-# ~60-second voice trial for non-premium users, gating the real
-# /speak endpoint (not the separate canned /speak/preview line).
-# Same optimistic-concurrency shape as try_consume_message, see
+# ~60-second voice trial for non-premium users, shared across the
+# /speak endpoint (cost estimated from reply text via
+# estimate_speech_seconds) and /chat/voice (flat
+# VOICE_INPUT_TRIAL_COST_SECONDS per turn). Same optimistic-
+# concurrency shape as try_consume_message, see
 # test_try_consume_message.py.
+#
+# try_consume_voice_trial itself just takes the cost as a plain
+# int -- callers decide how many seconds a turn costs, this only
+# enforces the shared budget. estimate_speech_seconds (the
+# /speak-side estimator) is tested separately below.
 # ============================================================
 
 from unittest.mock import patch, MagicMock
 
-from database import OllieDB, TRIAL_VOICE_SECONDS_LIMIT, ESTIMATED_CHARS_PER_SECOND
+from database import OllieDB, TRIAL_VOICE_SECONDS_LIMIT, ESTIMATED_CHARS_PER_SECOND, estimate_speech_seconds
 
 
 def _result(data):
@@ -25,21 +32,20 @@ def _update_chain(mock_supabase):
     return mock_supabase.table.return_value.update.return_value.eq.return_value.eq.return_value.execute
 
 
-def test_fresh_user_can_consume_a_short_message():
+def test_fresh_user_can_consume_a_small_cost():
     with patch("database.supabase") as mock_supabase:
         _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": 0})
         _update_chain(mock_supabase).return_value = _result([{"voice_trial_seconds_used": 5}])
 
-        assert OllieDB().try_consume_voice_trial("user-1", "hey there!") is True
+        assert OllieDB().try_consume_voice_trial("user-1", 5) is True
 
 
-def test_estimated_duration_is_deducted_correctly():
-    text = "a" * (ESTIMATED_CHARS_PER_SECOND * 10)  # ~10 estimated seconds
+def test_consumed_amount_is_written_exactly():
     with patch("database.supabase") as mock_supabase:
         _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": 0})
         _update_chain(mock_supabase).return_value = _result([{}])
 
-        assert OllieDB().try_consume_voice_trial("user-1", text) is True
+        assert OllieDB().try_consume_voice_trial("user-1", 10) is True
 
         update_call = mock_supabase.table.return_value.update.call_args[0][0]
         assert update_call["voice_trial_seconds_used"] == 10
@@ -49,18 +55,17 @@ def test_exhausted_budget_is_rejected_without_writing():
     with patch("database.supabase") as mock_supabase:
         _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": TRIAL_VOICE_SECONDS_LIMIT})
 
-        assert OllieDB().try_consume_voice_trial("user-1", "hey") is False
+        assert OllieDB().try_consume_voice_trial("user-1", 1) is False
         mock_supabase.table.return_value.update.assert_not_called()
 
 
-def test_message_that_would_exceed_remaining_budget_is_rejected():
-    # 55 used, 5 remaining -- a message estimated well over 5s must
-    # not be allowed to push the total past the limit.
-    long_text = "a" * (ESTIMATED_CHARS_PER_SECOND * 20)  # ~20 estimated seconds
+def test_cost_that_would_exceed_remaining_budget_is_rejected():
+    # 55 used, 5 remaining -- a cost well over 5s must not be
+    # allowed to push the total past the limit.
     with patch("database.supabase") as mock_supabase:
         _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": 55})
 
-        assert OllieDB().try_consume_voice_trial("user-1", long_text) is False
+        assert OllieDB().try_consume_voice_trial("user-1", 20) is False
         mock_supabase.table.return_value.update.assert_not_called()
 
 
@@ -69,7 +74,7 @@ def test_never_used_field_defaults_to_zero():
         _select_chain(mock_supabase).return_value = _result({})  # no voice_trial_seconds_used key at all
         _update_chain(mock_supabase).return_value = _result([{}])
 
-        assert OllieDB().try_consume_voice_trial("user-1", "hey") is True
+        assert OllieDB().try_consume_voice_trial("user-1", 1) is True
 
 
 def test_concurrent_collision_retries_against_fresh_value_and_succeeds():
@@ -83,7 +88,7 @@ def test_concurrent_collision_retries_against_fresh_value_and_succeeds():
             _result([{}]),    # won on retry
         ]
 
-        assert OllieDB().try_consume_voice_trial("user-1", "hey there") is True
+        assert OllieDB().try_consume_voice_trial("user-1", 3) is True
         assert _update_chain(mock_supabase).call_count == 2
 
 
@@ -92,7 +97,7 @@ def test_exhausts_retries_and_fails_closed_under_perpetual_contention():
         _select_chain(mock_supabase).return_value = _result({"voice_trial_seconds_used": 0})
         _update_chain(mock_supabase).return_value = _result([])  # always loses
 
-        assert OllieDB().try_consume_voice_trial("user-1", "hey") is False
+        assert OllieDB().try_consume_voice_trial("user-1", 1) is False
         assert _update_chain(mock_supabase).call_count == 5
 
 
@@ -123,3 +128,21 @@ def test_remaining_defaults_to_full_limit_when_field_missing():
     with patch("database.supabase") as mock_supabase:
         _select_chain(mock_supabase).return_value = _result({})
         assert OllieDB().get_voice_trial_remaining("user-1") == TRIAL_VOICE_SECONDS_LIMIT
+
+
+# ============================================================
+# estimate_speech_seconds -- the /speak-side cost estimator.
+# Pure function, no db involved.
+# ============================================================
+
+def test_estimate_rounds_up_to_at_least_one_second():
+    assert estimate_speech_seconds("hi") == 1
+
+
+def test_estimate_scales_with_character_count():
+    text = "a" * (ESTIMATED_CHARS_PER_SECOND * 10)  # ~10 estimated seconds
+    assert estimate_speech_seconds(text) == 10
+
+
+def test_estimate_of_empty_string_is_still_at_least_one():
+    assert estimate_speech_seconds("") == 1
