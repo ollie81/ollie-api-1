@@ -41,10 +41,16 @@ def _run(audio_bytes=b"fake audio bytes", utc_offset_minutes=None, user_id="user
     ))
 
 
-def _mock_db(mock_db_cls, *, trial_ok=True, remaining=42):
+def _mock_db(mock_db_cls, *, trial_ok=True, remaining=42, trial_raises=None, remaining_raises=None):
     instance = mock_db_cls.return_value
-    instance.try_consume_voice_trial.return_value = trial_ok
-    instance.get_voice_trial_remaining.return_value = remaining
+    if trial_raises:
+        instance.try_consume_voice_trial.side_effect = trial_raises
+    else:
+        instance.try_consume_voice_trial.return_value = trial_ok
+    if remaining_raises:
+        instance.get_voice_trial_remaining.side_effect = remaining_raises
+    else:
+        instance.get_voice_trial_remaining.return_value = remaining
     return instance
 
 
@@ -131,6 +137,45 @@ def test_silent_recording_still_returns_400_after_charging_trial():
         assert exc_info.value.status_code == 400
         db.try_consume_voice_trial.assert_called_once()
         mock_openai.audio.transcriptions.create.assert_called_once()
+
+
+def test_trial_check_exception_returns_clean_500_not_unhandled():
+    # Regression: a raw (non-HTTPException) exception here used to
+    # propagate unhandled, which Starlette's default error handler
+    # turns into a plain-text 500 the Flutter client can't pull a
+    # message out of -- it fell back to a generic "Failed to process
+    # voice message" with no clue what actually happened.
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
+         patch("chat.openai_client") as mock_openai:
+        _mock_db(mock_db_cls, trial_raises=Exception("connection reset"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            _run()
+
+        assert exc_info.value.status_code == 500
+        # Never got far enough to pay for Whisper on a request we
+        # couldn't even confirm was allowed.
+        mock_openai.audio.transcriptions.create.assert_not_called()
+
+
+def test_trial_balance_read_failure_does_not_discard_successful_reply():
+    # Regression: by this point the reply is already fully processed
+    # and saved (conversation history, memory, streak...). A hiccup
+    # reading the trial balance afterward must not turn an already-
+    # successful turn into a hard failure for the client.
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
+         patch("chat.openai_client") as mock_openai, \
+         patch("chat._process_chat_message", return_value={"reply": "hey!"}):
+        _mock_db(mock_db_cls, trial_ok=True, remaining_raises=Exception("connection reset"))
+        _mock_transcription(mock_openai)
+
+        result = _run()
+
+        assert result["reply"] == "hey!"
+        assert result["transcribed_text"] == "hello there"
+        assert "voice_trial_seconds_remaining" not in result
 
 
 def test_premium_status_reused_for_response_shape_not_rechecked():
