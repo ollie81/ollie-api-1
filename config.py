@@ -34,14 +34,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 # ============================================================
-# PAPLA MEDIA VOICE
-# ============================================================
-
-PAPLA_API_KEY = os.getenv("PAPLA_API_KEY")
-OLLIE_VOICE_ID = os.getenv("PAPLA_VOICE_ID")
-PAPLA_TTS_URL = "https://api.papla.media/v1/text-to-speech"
-
-# ============================================================
 # GOOGLE PLAY BILLING (real purchase verification)
 # ============================================================
 

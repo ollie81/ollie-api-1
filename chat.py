@@ -2,7 +2,6 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-import requests
 from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.responses import Response
@@ -11,7 +10,7 @@ from typing import List
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from config import OPENAI_API_KEY, PAPLA_API_KEY, OLLIE_VOICE_ID, PAPLA_TTS_URL
+from config import OPENAI_API_KEY
 from database import OllieDB, supabase, estimate_speech_seconds, VOICE_INPUT_TRIAL_COST_SECONDS
 from premium import is_premium_active
 from memory import (
@@ -461,45 +460,39 @@ async def chat_voice(
 # ============================================================
 # SPEAK ROUTE — streams directly, no file saving
 # ============================================================
+# Uses OpenAI TTS (same OPENAI_API_KEY already used for chat and
+# Whisper transcription -- no separate voice-provider account or
+# API key needed). Previously called Papla Media, which shut down;
+# swapping the provider only ever touches this one function, since
+# every caller (/speak, /speak/preview, and the trial/premium
+# logic around them) just deals in raw audio bytes.
+
+# One of OpenAI's fixed preset voices -- change this one line to
+# try a different voice for Ollie (alternatives: alloy, echo,
+# fable, nova, shimmer).
+OLLIE_TTS_VOICE = "onyx"
+
 
 def _synthesize_speech(text: str) -> bytes:
     """
-    Calls Papla TTS with retry and returns the raw audio bytes.
+    Calls OpenAI TTS with retry and returns the raw audio bytes.
     Raises HTTPException(500) itself on failure, so callers don't
     need their own error handling around this.
     """
-    if not PAPLA_API_KEY or not OLLIE_VOICE_ID:
-        raise HTTPException(status_code=500, detail="Voice not configured")
-
-    url = f"{PAPLA_TTS_URL}/{OLLIE_VOICE_ID}"
-    headers = {
-        "Accept": "audio/mpeg",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {PAPLA_API_KEY}"
-    }
-    data = {
-        "text": text,
-        "model_id": "papla_p1",
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-        }
-    }
-
     max_retries = 1
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            response = requests.post(url, json=data, headers=headers, timeout=15)
-            if response.status_code == 200:
-                return response.content
+            response = openai_client.audio.speech.create(
+                model="tts-1",
+                voice=OLLIE_TTS_VOICE,
+                input=text,
+            )
+            return response.content
 
-            logger.warning(f"_synthesize_speech: Papla returned {response.status_code} on attempt {attempt + 1}")
-            last_error = f"Papla returned status {response.status_code}"
-
-        except requests.RequestException as e:
+        except Exception as e:
             last_error = str(e)
-            logger.warning(f"_synthesize_speech: request to Papla failed on attempt {attempt + 1}: {e}")
+            logger.warning(f"_synthesize_speech: OpenAI TTS request failed on attempt {attempt + 1}: {e}")
 
         if attempt < max_retries:
             time.sleep(0.5)
