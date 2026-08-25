@@ -405,9 +405,18 @@ async def chat_voice(
     # Gated here, before the Whisper call -- the first real money
     # this turn spends -- rather than after transcription, which
     # would mean paying for Whisper on a turn that was never going
-    # to be allowed through anyway.
-    if not is_premium and not db.try_consume_voice_trial(user_id, VOICE_INPUT_TRIAL_COST_SECONDS):
-        raise HTTPException(status_code=402, detail="Voice chat requires Ollie Premium")
+    # to be allowed through anyway. Wrapped so a DB hiccup fails
+    # closed with a clean, JSON error instead of an unhandled
+    # exception -- which Starlette's default handler turns into a
+    # plain-text response the client can't parse a message out of.
+    if not is_premium:
+        try:
+            trial_ok = db.try_consume_voice_trial(user_id, VOICE_INPUT_TRIAL_COST_SECONDS)
+        except Exception as e:
+            logger.error(f"chat_voice: trial check failed for user {user_id}: {e}")
+            raise HTTPException(status_code=500, detail="Something went wrong, please try again")
+        if not trial_ok:
+            raise HTTPException(status_code=402, detail="Voice chat requires Ollie Premium")
 
     try:
         transcription = openai_client.audio.transcriptions.create(
@@ -437,7 +446,16 @@ async def chat_voice(
 
     result["transcribed_text"] = transcribed_text
     if not is_premium:
-        result["voice_trial_seconds_remaining"] = db.get_voice_trial_remaining(user_id)
+        # Best-effort -- the reply above is already fully processed
+        # and saved (conversation history, memory, streak, everything
+        # committed), so a hiccup reading the trial balance here must
+        # never turn an otherwise-successful reply into a hard
+        # failure for the client. Just omitted on failure, same as
+        # it already is for premium users.
+        try:
+            result["voice_trial_seconds_remaining"] = db.get_voice_trial_remaining(user_id)
+        except Exception as e:
+            logger.warning(f"chat_voice: could not read voice trial balance for user {user_id}: {e}")
     return result
 
 # ============================================================
@@ -503,17 +521,30 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
     db = OllieDB()
     user_id = current_user["id"]
     is_premium = is_premium_active(user_id)
-    if not is_premium and not db.try_consume_voice_trial(user_id, estimate_speech_seconds(req.message)):
-        raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
+    if not is_premium:
+        try:
+            trial_ok = db.try_consume_voice_trial(user_id, estimate_speech_seconds(req.message))
+        except Exception as e:
+            logger.error(f"speak: trial check failed for user {user_id}: {e}")
+            raise HTTPException(status_code=500, detail="Something went wrong, please try again")
+        if not trial_ok:
+            raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
 
     audio = _synthesize_speech(req.message)
 
     # Lets the client show a live "X seconds left" indicator without
     # a separate round-trip -- headers ride along with the binary
-    # audio body for free. Omitted for premium (nothing to count).
+    # audio body for free. Omitted for premium (nothing to count),
+    # and best-effort for the trial -- audio is already synthesized
+    # and paid for by this point, so a hiccup reading the balance
+    # must never turn an otherwise-successful reply into a hard
+    # failure for the client.
     headers = {}
     if not is_premium:
-        headers["X-Voice-Trial-Remaining-Seconds"] = str(db.get_voice_trial_remaining(user_id))
+        try:
+            headers["X-Voice-Trial-Remaining-Seconds"] = str(db.get_voice_trial_remaining(user_id))
+        except Exception as e:
+            logger.warning(f"speak: could not read voice trial balance for user {user_id}: {e}")
 
     return Response(content=audio, media_type="audio/mpeg", headers=headers)
 
