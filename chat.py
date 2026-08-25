@@ -414,7 +414,7 @@ async def chat_voice(
             trial_ok = db.try_consume_voice_trial(user_id, VOICE_INPUT_TRIAL_COST_SECONDS)
         except Exception as e:
             logger.error(f"chat_voice: trial check failed for user {user_id}: {e}")
-            raise HTTPException(status_code=500, detail="Something went wrong, please try again")
+            raise HTTPException(status_code=500, detail="Could not check your voice trial, please try again")
         if not trial_ok:
             raise HTTPException(status_code=402, detail="Voice chat requires Ollie Premium")
 
@@ -526,7 +526,7 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
             trial_ok = db.try_consume_voice_trial(user_id, estimate_speech_seconds(req.message))
         except Exception as e:
             logger.error(f"speak: trial check failed for user {user_id}: {e}")
-            raise HTTPException(status_code=500, detail="Something went wrong, please try again")
+            raise HTTPException(status_code=500, detail="Could not check your voice trial, please try again")
         if not trial_ok:
             raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
 
