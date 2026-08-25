@@ -12,7 +12,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from config import OPENAI_API_KEY, PAPLA_API_KEY, OLLIE_VOICE_ID, PAPLA_TTS_URL
-from database import OllieDB, supabase
+from database import OllieDB, supabase, estimate_speech_seconds, VOICE_INPUT_TRIAL_COST_SECONDS
 from premium import is_premium_active
 from memory import (
     detect_language,
@@ -376,9 +376,11 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
 
 # ============================================================
 # VOICE CHAT ROUTE — record a voice message, get a real spoken-
-# to-text-to-Ollie reply back. Premium-only (see is_premium_active
-# in premium.py) — voice costs real money per use (Whisper +
-# Papla), unlike text.
+# to-text-to-Ollie reply back. Unlimited for premium (see
+# is_premium_active in premium.py); everyone else gets the same
+# free voice trial /speak uses (TRIAL_VOICE_SECONDS_LIMIT, shared
+# budget), charged a flat cost per turn since voice costs real
+# money per use (Whisper + the chat model), unlike text.
 # ============================================================
 
 @router.post("/chat/voice")
@@ -389,9 +391,7 @@ async def chat_voice(
 ):
     db = OllieDB()
     user_id = current_user["id"]
-
-    if not is_premium_active(user_id):
-        raise HTTPException(status_code=402, detail="Voice chat requires Ollie Premium")
+    is_premium = is_premium_active(user_id)
 
     try:
         audio_bytes = await audio.read()
@@ -401,6 +401,13 @@ async def chat_voice(
 
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio file")
+
+    # Gated here, before the Whisper call -- the first real money
+    # this turn spends -- rather than after transcription, which
+    # would mean paying for Whisper on a turn that was never going
+    # to be allowed through anyway.
+    if not is_premium and not db.try_consume_voice_trial(user_id, VOICE_INPUT_TRIAL_COST_SECONDS):
+        raise HTTPException(status_code=402, detail="Voice chat requires Ollie Premium")
 
     try:
         transcription = openai_client.audio.transcriptions.create(
@@ -415,9 +422,9 @@ async def chat_voice(
     if not transcribed_text:
         raise HTTPException(status_code=400, detail="Couldn't hear anything in that recording")
 
-    # Always premium here (checked above) -- tracked the same way
-    # the text route tracks premium usage: informational only,
-    # never enforced against.
+    # Tracked the same way the text route tracks usage: informational
+    # only, for the "messages used today" display -- never enforced
+    # here, voice is gated by premium/trial above, not this count.
     db.increment_message_count(user_id)
 
     try:
@@ -429,6 +436,8 @@ async def chat_voice(
         raise HTTPException(status_code=500, detail="Something went wrong, please try again")
 
     result["transcribed_text"] = transcribed_text
+    if not is_premium:
+        result["voice_trial_seconds_remaining"] = db.get_voice_trial_remaining(user_id)
     return result
 
 # ============================================================
@@ -494,7 +503,7 @@ def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
     db = OllieDB()
     user_id = current_user["id"]
     is_premium = is_premium_active(user_id)
-    if not is_premium and not db.try_consume_voice_trial(user_id, req.message):
+    if not is_premium and not db.try_consume_voice_trial(user_id, estimate_speech_seconds(req.message)):
         raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
 
     audio = _synthesize_speech(req.message)

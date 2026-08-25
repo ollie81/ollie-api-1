@@ -28,6 +28,23 @@ TRIAL_VOICE_SECONDS_LIMIT = 60
 # one-time trial, not meant to be exact.
 ESTIMATED_CHARS_PER_SECOND = 15
 
+# Flat per-turn cost charged against the same trial budget for
+# /chat/voice (mic input). Charged before the Whisper call rather
+# than derived from the transcribed text afterward -- by the time
+# transcription finishes, the expensive part (Whisper) already
+# happened, so there'd be nothing left to gate.
+VOICE_INPUT_TRIAL_COST_SECONDS = 10
+
+
+def estimate_speech_seconds(text: str) -> int:
+    """
+    Rough spoken-duration estimate from character count, used to
+    budget the /speak free voice trial before synthesis happens.
+    Not meant to be exact -- see ESTIMATED_CHARS_PER_SECOND.
+    """
+    return max(1, round(len(text) / ESTIMATED_CHARS_PER_SECOND))
+
+
 class OllieDB:
     def __init__(self):
         self.supabase = supabase
@@ -388,23 +405,28 @@ class OllieDB:
         # rather than risk over-granting.
         return False
 
-    def try_consume_voice_trial(self, user_id: str, text: str) -> bool:
+    def try_consume_voice_trial(self, user_id: str, estimated_seconds: int) -> bool:
         """
         Atomic check-and-consume against the free lifetime voice
         trial (TRIAL_VOICE_SECONDS_LIMIT), same optimistic-
-        concurrency shape as try_consume_message -- an estimated
-        duration is deducted, but only if the running total still
-        matches what was just read, so two taps in quick succession
-        can't both read the same remaining budget and both pass.
+        concurrency shape as try_consume_message -- estimated_seconds
+        is deducted, but only if the running total still matches
+        what was just read, so two taps in quick succession can't
+        both read the same remaining budget and both pass.
 
-        Returns False (nothing consumed) if the estimated duration
-        would exceed the remaining budget -- including when it's
-        already exhausted. Callers should only call this for
-        non-premium users; it always enforces the trial cap, it
-        doesn't know about premium itself.
+        Callers decide their own cost: /speak estimates from the
+        reply text (see estimate_speech_seconds), /chat/voice
+        charges a flat VOICE_INPUT_TRIAL_COST_SECONDS up front so
+        it isn't left trusting a client-reported duration or
+        waiting on the (already-expensive) transcription just to
+        learn the text length.
+
+        Returns False (nothing consumed) if estimated_seconds would
+        exceed the remaining budget -- including when it's already
+        exhausted. Callers should only call this for non-premium
+        users; it always enforces the trial cap, it doesn't know
+        about premium itself.
         """
-        estimated_seconds = max(1, round(len(text) / ESTIMATED_CHARS_PER_SECOND))
-
         for _ in range(5):
             result = self.supabase.table("users") \
                 .select("voice_trial_seconds_used") \
