@@ -470,7 +470,7 @@ async def chat_voice(
 # One of OpenAI's fixed preset voices -- change this one line to
 # try a different voice for Ollie (alternatives: alloy, echo,
 # fable, nova, shimmer).
-OLLIE_TTS_VOICE = "onyx"
+OLLIE_TTS_VOICE = "echo"
 
 
 def _synthesize_speech(text: str) -> bytes:
