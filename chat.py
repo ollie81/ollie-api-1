@@ -1,3 +1,4 @@
+import base64
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from memory import (
     detect_mood,
     extract_goal,
     pick_chat_model,
+    FAST_MODEL,
     FLAGSHIP_MODEL,
     CRISIS_KEYWORDS,
     moderate_text,
@@ -456,6 +458,159 @@ async def chat_voice(
         except Exception as e:
             logger.warning(f"chat_voice: could not read voice trial balance for user {user_id}: {e}")
     return result
+
+# ============================================================
+# IMAGE CHAT ROUTE — send a photo, get a real reaction to it.
+# Its own, smaller pipeline (not _process_chat_message): most of
+# that pipeline -- language detection, memory/mood/goal
+# extraction, event/reminder scheduling -- is built around text
+# and doesn't map onto "a photo was shared". Reactions are still
+# generated, saved to history, and moderated the same way; nothing
+# beyond that runs. Free tier, same daily cap as text (see /chat)
+# -- a shared photo isn't a premium-only moment any more than a
+# shared sentence is.
+# ============================================================
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10MB -- generous for a phone photo, caps abuse/cost
+
+IMAGE_REACTION_INSTRUCTIONS = (
+    "\n\nThe user just sent a PHOTO instead of text. React to what's "
+    "actually in the image like a real friend would -- specific to what "
+    "you see, not a generic \"nice pic\". If they added a caption, "
+    "respond to that too, naturally."
+)
+
+
+def _get_image_reaction(
+    image_bytes: bytes,
+    content_type: str,
+    caption: str | None,
+    system_prompt: str,
+    server_history: list,
+    max_retries: int = 1,
+) -> str:
+    """
+    Same retry-with-backoff shape as get_ollie_response -- a
+    transient failure falls back to an in-character line instead
+    of a hard error, so a shared photo never ends in a raw 500.
+    """
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    user_content = [
+        {
+            "type": "text",
+            "text": caption.strip() if caption and caption.strip() else "(no caption, just the photo)",
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{content_type};base64,{b64_image}"},
+        },
+    ]
+    messages = [{"role": "system", "content": system_prompt}] + server_history + [
+        {"role": "user", "content": user_content}
+    ]
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = openai_client.chat.completions.create(
+                model=FAST_MODEL,
+                messages=messages,
+                max_completion_tokens=400,
+                temperature=1,
+                timeout=25,
+            )
+            content = response.choices[0].message.content
+            if content and content.strip():
+                return content.strip()
+            logger.warning(f"_get_image_reaction: empty content on attempt {attempt + 1}")
+        except Exception as e:
+            logger.warning(f"_get_image_reaction: attempt {attempt + 1} failed: {e}")
+
+        if attempt < max_retries:
+            time.sleep(0.5)
+
+    return "okay i can tell you sent something but my brain glitched — send it again?"
+
+
+def _process_image_message(
+    db: OllieDB,
+    user_id: str,
+    image_bytes: bytes,
+    content_type: str,
+    caption: str | None,
+    utc_offset_minutes: int | None,
+) -> dict:
+    session_id = db.get_or_create_session(user_id)
+    db.remember_utc_offset(user_id, utc_offset_minutes)
+
+    language = detect_language(caption) if caption and caption.strip() else "english"
+
+    memories = db.get_relevant_memories(user_id)
+    context = db.get_user_context(user_id)
+    memory_block = build_memory_context(memories, context)
+
+    raw_history = db.get_recent_messages(user_id, limit=12)
+    server_history = clean_history(raw_history)
+
+    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes) + IMAGE_REACTION_INSTRUCTIONS
+
+    # The image itself is never stored -- only a text placeholder,
+    # same principle as /chat/voice only keeping the transcript,
+    # not the audio. Ollie's reply is what actually needs to persist.
+    user_display_text = f"[shared a photo] {caption.strip()}" if caption and caption.strip() else "[shared a photo]"
+    db.save_message(user_id, session_id, user_display_text, "user")
+
+    reply = _get_image_reaction(image_bytes, content_type, caption, system_prompt, server_history)
+
+    output_moderation = moderate_text(reply)
+    if output_moderation:
+        _flag_moderation(user_id, "output", reply, output_moderation["categories"])
+
+    db.save_message(user_id, session_id, reply, "ollie", 0.0)
+
+    streak = db.update_streak(user_id, utc_offset_minutes)
+
+    return {"reply": reply, "streak": streak}
+
+
+@router.post("/chat/image")
+async def chat_image(
+    image: UploadFile = File(...),
+    caption: str | None = Form(None),
+    utc_offset_minutes: int | None = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    db = OllieDB()
+    user_id = current_user["id"]
+
+    try:
+        image_bytes = await image.read()
+    except Exception as e:
+        logger.warning(f"chat_image: failed to read upload for user {user_id}: {e}")
+        raise HTTPException(status_code=400, detail="Could not read image file")
+
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Empty image file")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Image is too large")
+
+    content_type = image.content_type or "image/jpeg"
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    # Same free-tier gating as text chat -- a shared photo counts
+    # as a message like any other, not a separate premium feature.
+    if is_premium_active(user_id):
+        db.increment_message_count(user_id)
+    elif not db.try_consume_message(user_id):
+        raise HTTPException(status_code=429, detail="Daily limit reached")
+
+    try:
+        return _process_image_message(db, user_id, image_bytes, content_type, caption, utc_offset_minutes)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"chat_image route failed for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong, please try again")
 
 # ============================================================
 # SPEAK ROUTE — streams directly, no file saving
