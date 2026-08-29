@@ -49,6 +49,11 @@ MAX_CHECKINS_PER_USER_PER_DAY = 1
 MIN_HOURS = 1
 MAX_HOURS = 24 * 30  # 30 days
 
+# How soon after scheduling a reminder a follow-up message can
+# still be treated as correcting it (see _try_correct_recent_reminder)
+# rather than an unrelated later message.
+REMINDER_CORRECTION_WINDOW_MINUTES = 3
+
 
 # ============================================================
 # DETECTION — passive check-ins
@@ -442,10 +447,107 @@ tone, no quotation marks around it."""
         return fallback
 
 
+def _looks_like_reminder_correction(text: str) -> bool:
+    """
+    Cheap keyword pre-check, same role as _looks_like_reminder_request
+    -- only decides whether it's worth even looking for a recently
+    scheduled reminder to correct, not a real detector by itself.
+    """
+    text_lower = (text or "").lower()
+    return any(kw in text_lower for kw in ("i mean", "i meant", "meant to say", "not what i", "correction"))
+
+
+def _extract_reminder_correction(previous_text: str, message: str) -> str | None:
+    """
+    Given the text a reminder was just scheduled with, and a
+    follow-up message that might be correcting it, returns the
+    corrected reminder text -- or None if this message isn't
+    actually correcting that reminder after all.
+    """
+    response = openai_client.chat.completions.create(
+        model=FAST_MODEL,
+        messages=[{
+            "role": "system",
+            "content": (
+                f'A reminder was just scheduled with this text: "{previous_text}". '
+                "The next message the same user sent might be correcting what "
+                "that reminder should actually say (e.g. a typo fix or "
+                '"I mean X not Y"). If it IS such a correction, reply with '
+                "ONLY the corrected reminder text, short, same style as the "
+                "original. If it's NOT correcting that reminder, reply with "
+                "ONLY an empty string."
+            )
+        }, {"role": "user", "content": message}],
+        max_completion_tokens=40,
+        temperature=0,
+        timeout=10,
+    )
+    content = response.choices[0].message.content
+    if content is None:
+        return None
+    return content.strip() or None
+
+
+def _try_correct_recent_reminder(user_id: str, message: str, now_utc_dt: datetime) -> bool:
+    """
+    Handles a real gap: each message is checked independently for
+    whether IT is a new reminder request, so a typo in one message
+    ("remind me to go to it in 10 minutes") followed by a
+    correction in the very next one ("I mean to eat not to it")
+    left the reminder scheduled with the typo'd text forever --
+    the correction was never itself an explicit reminder request,
+    so detect_explicit_reminder just ignored it.
+
+    Only even looks (a DB query, then an LLM call) when the cheap
+    keyword gate matches AND this user has a reminder scheduled in
+    the last REMINDER_CORRECTION_WINDOW_MINUTES -- so it costs
+    nothing on ordinary messages, and can't reach back and "correct"
+    something scheduled long ago. Returns True if a reminder was
+    updated.
+    """
+    if not _looks_like_reminder_correction(message):
+        return False
+
+    cutoff = (now_utc_dt - timedelta(minutes=REMINDER_CORRECTION_WINDOW_MINUTES)).isoformat()
+    recent = (
+        supabase.table("scheduled_events")
+        .select("id, event_summary")
+        .eq("user_id", user_id)
+        .eq("kind", "reminder")
+        .eq("status", "pending")
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not recent.data:
+        return False
+
+    row = recent.data[0]
+
+    try:
+        corrected_text = _extract_reminder_correction(row["event_summary"], message)
+    except Exception as e:
+        logger.warning(f"_try_correct_recent_reminder: extraction failed for user {user_id}: {e}")
+        return False
+
+    if not corrected_text:
+        return False
+
+    supabase.table("scheduled_events").update({
+        "event_summary": corrected_text,
+        "notification_body": _personalize_reminder(corrected_text),
+    }).eq("id", row["id"]).execute()
+
+    logger.info(f"corrected reminder for user {user_id}: {row['event_summary']!r} -> {corrected_text!r}")
+    return True
+
+
 def maybe_schedule_reminder(user_id: str, message: str, utc_offset_minutes: int | None = None) -> None:
     try:
         reminder = detect_explicit_reminder(message, utc_offset_minutes)
         if not reminder:
+            _try_correct_recent_reminder(user_id, message, datetime.now(timezone.utc))
             return
 
         scheduled_for = (
