@@ -32,6 +32,7 @@ from personality import OLLIE_PERSONALITY
 from auth import get_current_user
 from event_scheduler import maybe_schedule_event, maybe_schedule_reminder
 from interest_memory import maybe_track_interest, build_interest_context
+from modes import mode_block, MODE_LABELS, MODE_OPENER_FALLBACKS
 logger = logging.getLogger("ollie.chat")
 
 router = APIRouter()
@@ -66,9 +67,14 @@ class ChatRequest(BaseModel):
     message: str
     history: List[dict] = []
     utc_offset_minutes: int | None = None
+    mode: str | None = None
 
 class SpeakRequest(BaseModel):
     message: str
+
+class ModeStarterRequest(BaseModel):
+    mode: str
+    utc_offset_minutes: int | None = None
 
 # ============================================================
 # PROMPT BUILDER
@@ -130,9 +136,10 @@ def build_system_prompt(
     memory_block: str,
     utc_offset_minutes: int | None = None,
     location_block: str = "",
+    mode_instructions: str = "",
 ) -> str:
     """
-    Structure: PERSONALITY → MEMORY → LOCATION → TIME → LANGUAGE RULE → HARD RULES
+    Structure: PERSONALITY → MEMORY → LOCATION → MODE → TIME → LANGUAGE RULE → HARD RULES
     Memory injected before rules are finalized.
     """
     parts = [OLLIE_PERSONALITY]
@@ -142,6 +149,9 @@ def build_system_prompt(
 
     if location_block:
         parts.append(location_block)
+
+    if mode_instructions:
+        parts.append(mode_instructions)
 
     parts.append(f"\n{_current_time_line(utc_offset_minutes)}")
 
@@ -175,6 +185,7 @@ def get_ollie_response(
     utc_offset_minutes: int | None = None,
     max_retries: int = 2,
     location_block: str = "",
+    mode_instructions: str = "",
 ) -> str:
     """
     Calls the model to get Ollie's reply. Retries on transient
@@ -183,7 +194,7 @@ def get_ollie_response(
     logged with which model and attempt number, so real outages
     are visible instead of silently producing generic replies.
     """
-    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes, location_block)
+    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes, location_block, mode_instructions)
 
     messages = [{"role": "system", "content": system_prompt}]
     messages += server_history
@@ -284,7 +295,7 @@ def _flag_moderation(user_id: str, direction: str, text: str, categories: list) 
 # gating) before calling this.
 # ============================================================
 
-def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None, current_user: dict) -> dict:
+def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None, current_user: dict, mode: str | None = None) -> dict:
     session_id = db.get_or_create_session(user_id)
     db.remember_utc_offset(user_id, utc_offset_minutes)
 
@@ -333,9 +344,10 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
 
     # Get response
     location_block = _location_block(current_user)
+    mode_instructions = mode_block(mode)
     reply = get_ollie_response(
         message, language, server_history, prompt_context, model, utc_offset_minutes,
-        location_block=location_block,
+        location_block=location_block, mode_instructions=mode_instructions,
     )
 
     output_moderation = moderate_text(reply)
@@ -446,7 +458,7 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
-        return _process_chat_message(db, user_id, req.message, req.utc_offset_minutes, current_user)
+        return _process_chat_message(db, user_id, req.message, req.utc_offset_minutes, current_user, mode=req.mode)
     except HTTPException:
         raise
     except Exception as e:
@@ -466,6 +478,7 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
 async def chat_voice(
     audio: UploadFile = File(...),
     utc_offset_minutes: int | None = Form(None),
+    mode: str | None = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
     db = OllieDB()
@@ -516,7 +529,7 @@ async def chat_voice(
     db.increment_message_count(user_id)
 
     try:
-        result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes, current_user)
+        result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes, current_user, mode=mode)
     except HTTPException:
         raise
     except Exception as e:
@@ -536,6 +549,72 @@ async def chat_voice(
         except Exception as e:
             logger.warning(f"chat_voice: could not read voice trial balance for user {user_id}: {e}")
     return result
+
+# ============================================================
+# MODE STARTER — "Do It With Me": Ollie speaks first when a mode
+# session opens, instead of waiting for the user to explain what
+# they want. A direct system-only model call (same shape as
+# daily_message.py's proactive generators), NOT _process_chat_message
+# -- there's no real user message yet, so nothing to extract memory/
+# mood/goals from, and it doesn't count against the daily limit or
+# touch the streak (that's credited for the USER engaging, not Ollie
+# speaking first). The opener itself is still saved to history, so
+# it's there when the user scrolls back.
+# ============================================================
+
+def _generate_mode_opener(user_id: str, mode: str, current_user: dict, utc_offset_minutes: int | None) -> str:
+    db = OllieDB()
+    try:
+        if current_user.get("memory_enabled") is not False:
+            memories = db.get_relevant_memories(user_id)
+            context = db.get_user_context(user_id)
+            memory_block = build_memory_context(memories, context)
+        else:
+            memory_block = ""
+
+        location_block = _location_block(current_user)
+        mode_instructions = mode_block(mode, is_opening=True)
+        system_prompt = build_system_prompt("english", memory_block, utc_offset_minutes, location_block, mode_instructions)
+
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[{"role": "system", "content": system_prompt}],
+            max_completion_tokens=120,
+            temperature=1,
+            timeout=15,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if not content:
+            return MODE_OPENER_FALLBACKS.get(mode, "hey! ready when you are")
+
+        if moderate_text(content):
+            logger.warning(f"mode_opener: generated message flagged for user {user_id}, using fallback")
+            return MODE_OPENER_FALLBACKS.get(mode, "hey! ready when you are")
+
+        return content
+    except Exception as e:
+        logger.warning(f"mode_opener: generation failed for user {user_id}, using fallback: {e}")
+        return MODE_OPENER_FALLBACKS.get(mode, "hey! ready when you are")
+
+
+@router.post("/chat/mode-starter")
+def chat_mode_starter(req: ModeStarterRequest, current_user: dict = Depends(get_current_user)):
+    if req.mode not in MODE_LABELS:
+        raise HTTPException(status_code=400, detail="Unknown mode")
+
+    db = OllieDB()
+    user_id = current_user["id"]
+
+    try:
+        session_id = db.get_or_create_session(user_id)
+        opener = _generate_mode_opener(user_id, req.mode, current_user, req.utc_offset_minutes)
+        db.save_message(user_id, session_id, opener, "ollie", 0.0)
+        return {"reply": opener, "mode": req.mode}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"chat_mode_starter failed for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Could not start that")
 
 # ============================================================
 # IMAGE CHAT ROUTE — send a photo, get a real reaction to it.
