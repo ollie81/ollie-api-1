@@ -17,7 +17,7 @@
 # starlette.requests.Request".
 # ============================================================
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 import jwt
@@ -83,7 +83,7 @@ def test_token_for_a_deleted_user_is_rejected():
 
 def test_expired_token_is_rejected():
     expired = jwt.encode(
-        {"sub": "user-1", "type": "access", "exp": datetime.utcnow() - timedelta(minutes=1)},
+        {"sub": "user-1", "type": "access", "exp": datetime.now(timezone.utc) - timedelta(minutes=1)},
         JWT_SECRET, algorithm=JWT_ALGORITHM,
     )
     with pytest.raises(HTTPException) as exc_info:
@@ -103,7 +103,7 @@ def test_refresh_shaped_token_is_not_accepted_as_access_token():
     # accepted here even if something else in the codebase ever
     # starts minting JWTs for another purpose.
     wrong_type = jwt.encode(
-        {"sub": "user-1", "type": "refresh", "exp": datetime.utcnow() + timedelta(minutes=5)},
+        {"sub": "user-1", "type": "refresh", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
         JWT_SECRET, algorithm=JWT_ALGORITHM,
     )
     with pytest.raises(HTTPException) as exc_info:
@@ -167,7 +167,7 @@ def test_login_error_message_does_not_reveal_whether_the_account_exists():
 # ---- /refresh: single-use token rotation ----
 
 def test_refresh_with_a_valid_token_rotates_it_and_keeps_the_same_user():
-    future_expiry = (datetime.utcnow() + timedelta(days=10)).isoformat()
+    future_expiry = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
             _mock_result([{"user_id": "user-1", "expires_at": future_expiry, "token_hash": "old-hash"}])
@@ -197,7 +197,7 @@ def test_refresh_with_an_unknown_token_is_rejected():
 
 
 def test_refresh_with_an_expired_token_is_rejected_and_cleaned_up():
-    past_expiry = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    past_expiry = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
             _mock_result([{"user_id": "user-1", "expires_at": past_expiry, "token_hash": "old-hash"}])
@@ -211,7 +211,7 @@ def test_refresh_with_an_expired_token_is_rejected_and_cleaned_up():
 def test_a_reused_refresh_token_is_rejected_the_second_time():
     # Simulates the real single-use flow: first call's row exists,
     # second call (replaying the same now-deleted token) finds nothing.
-    future_expiry = (datetime.utcnow() + timedelta(days=10)).isoformat()
+    future_expiry = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
             _mock_result([{"user_id": "user-1", "expires_at": future_expiry, "token_hash": "old-hash"}]),

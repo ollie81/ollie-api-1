@@ -10,7 +10,7 @@
 # exists, and password reset actually invalidates existing sessions.
 # ============================================================
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -104,7 +104,7 @@ def _signup_req(otp="123456", email="new@example.com", password="hunters2", dob=
 
 
 def test_signup_with_correct_code_creates_account_and_issues_tokens():
-    future = (datetime.utcnow() + timedelta(minutes=5)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
             _mock_result([]),  # no existing user
@@ -128,7 +128,7 @@ def test_signup_with_correct_code_creates_account_and_issues_tokens():
 
 
 def test_signup_with_wrong_code_is_rejected_and_account_not_created():
-    future = (datetime.utcnow() + timedelta(minutes=5)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
             _mock_result([]),
@@ -142,7 +142,7 @@ def test_signup_with_wrong_code_is_rejected_and_account_not_created():
 
 
 def test_signup_with_expired_code_is_rejected_and_cleaned_up():
-    past = (datetime.utcnow() - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
             _mock_result([]),
@@ -173,7 +173,7 @@ def test_signup_rejects_underage_date_of_birth():
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
             _mock_result([])
-        too_young = (datetime.utcnow() - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
+        too_young = (datetime.now(timezone.utc) - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
 
         with pytest.raises(HTTPException) as exc_info:
             email_signup(_signup_req(dob=too_young), _fake_request())
@@ -250,7 +250,7 @@ def test_forgot_password_for_unknown_email_is_404():
 
 
 def test_reset_with_correct_code_updates_password_and_kills_sessions():
-    future = (datetime.utcnow() + timedelta(minutes=5)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = _mock_result([{
             "id": "user-1", "email_otp_hash": _hash_otp("654321"), "email_otp_expires_at": future,
@@ -268,7 +268,7 @@ def test_reset_with_correct_code_updates_password_and_kills_sessions():
 
 
 def test_reset_with_wrong_code_is_rejected():
-    future = (datetime.utcnow() + timedelta(minutes=5)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = _mock_result([{
             "id": "user-1", "email_otp_hash": _hash_otp("654321"), "email_otp_expires_at": future,
@@ -282,7 +282,7 @@ def test_reset_with_wrong_code_is_rejected():
 
 
 def test_reset_with_expired_code_is_rejected():
-    past = (datetime.utcnow() - timedelta(minutes=1)).isoformat()
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = _mock_result([{
             "id": "user-1", "email_otp_hash": _hash_otp("654321"), "email_otp_expires_at": past,
