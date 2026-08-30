@@ -59,3 +59,17 @@ def test_other_usage_fields_still_present():
     assert result["current_streak"] == 2
     assert result["voice_trial_seconds_remaining"] == 42
     assert result["is_premium"] is True
+
+
+def test_location_fields_returned_when_set():
+    result = _run({"id": "user-1", "country": "Rwanda", "region": "Kigali", "district": "Kicukiro"})
+    assert result["country"] == "Rwanda"
+    assert result["region"] == "Kigali"
+    assert result["district"] == "Kicukiro"
+
+
+def test_location_fields_are_none_when_never_set():
+    result = _run({"id": "user-1"})
+    assert result["country"] is None
+    assert result["region"] is None
+    assert result["district"] is None
