@@ -144,6 +144,13 @@ def test_build_memory_context_caps_at_top_ten_by_importance():
     assert "fact 0" not in result  # importance 0, cut
 
 
+def test_build_memory_context_honors_custom_limit():
+    memories = [{"memory_text": f"fact {i}", "importance": i} for i in range(25)]
+    result = build_memory_context(memories, {}, limit=20)
+    assert "fact 5" in result  # importance 5, the 20th-highest, kept
+    assert "fact 4" not in result  # importance 4, the 21st-highest, cut
+
+
 def test_build_memory_context_shows_category_when_present():
     memories = [{"memory_text": "stuck on a login bug", "importance": 2, "category": "struggle"}]
     result = build_memory_context(memories, {})

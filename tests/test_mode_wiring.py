@@ -40,6 +40,7 @@ def _patched_pipeline():
     return [
         patch("chat.detect_language", return_value="english"),
         patch("chat.moderate_text", return_value=None),
+        patch("chat.is_premium_active", return_value=False),
         patch("chat.build_memory_context", return_value=""),
         patch("chat.clean_history", return_value=[]),
         patch("chat.pick_chat_model", return_value="gpt-4.1-nano"),

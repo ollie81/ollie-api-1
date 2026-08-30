@@ -64,6 +64,21 @@ def test_highlights_returned():
         assert summary["highlights"] == highlights
 
 
+def test_highlight_limit_is_passed_through_to_the_query():
+    with patch("database.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = \
+            _mock_result(None, count=0)
+        mock_supabase.table.return_value.select.return_value.eq.return_value.in_.return_value.order.return_value.execute.return_value = \
+            _mock_result([])
+        _patch_highlights(mock_supabase, [])
+
+        OllieDB().get_journey_summary("user-1", highlight_limit=100)
+
+        limit_chain = mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value \
+            .in_.return_value.order.return_value.order.return_value.limit
+        limit_chain.assert_called_once_with(100)
+
+
 def test_empty_results_default_to_empty_lists_and_zero():
     with patch("database.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = \

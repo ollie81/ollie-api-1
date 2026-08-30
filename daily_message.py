@@ -29,6 +29,7 @@ from memory import build_memory_context, moderate_text, FAST_MODEL
 from personality import OLLIE_PERSONALITY
 from interest_memory import build_interest_context
 from notification_service import NotificationService
+from premium import is_premium_active
 
 logger = logging.getLogger("ollie.daily_message")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -382,7 +383,10 @@ def run_daily_messages() -> None:
       - normal (default): morning + nightly + disappeared check at
         the default threshold -- today's baseline behavior.
       - frequent: same as normal, with a shorter disappeared
-        threshold (checks in sooner after silence).
+        threshold (checks in sooner after silence). Premium-only --
+        see settings.py's write-time gate; a non-premium user with
+        "frequent" already saved (e.g. a lapsed trial) is treated as
+        "normal" here rather than trusting the stored value forever.
     """
     try:
         now_utc = datetime.now(timezone.utc)
@@ -402,6 +406,8 @@ def run_daily_messages() -> None:
             frequency = row.get("notification_frequency") or "normal"
             if frequency == "off":
                 continue
+            if frequency == "frequent" and not is_premium_active(row["id"]):
+                frequency = "normal"
 
             try:
                 _process_morning_checkin(row, now_utc)

@@ -25,6 +25,7 @@ def _patch_common():
     return [
         patch("chat.detect_language", return_value="english"),
         patch("chat.moderate_text", return_value=None),
+        patch("chat.is_premium_active", return_value=False),
         patch("chat.build_memory_context", return_value="MEMORY BLOCK"),
         patch("chat.clean_history", return_value=[]),
         patch("chat.pick_chat_model", return_value="gpt-4.1-nano"),
@@ -89,7 +90,7 @@ def test_memory_disabled_still_replies_and_updates_streak():
 
 def test_memory_enabled_by_default_reads_and_writes():
     db, _ = _run_with_mocks({"id": "user-1"})  # unset -- must default to enabled
-    db.get_relevant_memories.assert_called_once_with("user-1")
+    db.get_relevant_memories.assert_called_once_with("user-1", limit=10)
     db.get_user_context.assert_called_once_with("user-1")
     db.save_memory.assert_called_once_with("user-1", "Has a dog named Max", importance=2, category="person")
     db.update_mood.assert_called_once_with("user-1", "happy")
@@ -112,6 +113,7 @@ def test_goal_completion_closes_goal_and_logs_accomplishment():
 
     with patch("chat.detect_language", return_value="english"), \
          patch("chat.moderate_text", return_value=None), \
+         patch("chat.is_premium_active", return_value=False), \
          patch("chat.build_memory_context", return_value=""), \
          patch("chat.clean_history", return_value=[]), \
          patch("chat.pick_chat_model", return_value="gpt-4.1-nano"), \
@@ -143,6 +145,7 @@ def _run_image_with_mocks(current_user):
     db.update_streak.return_value = 1
 
     with patch("chat.detect_language", return_value="english"), \
+         patch("chat.is_premium_active", return_value=False), \
          patch("chat.build_memory_context", return_value="MEMORY BLOCK"), \
          patch("chat.clean_history", return_value=[]), \
          patch("chat._location_block", return_value=""), \
@@ -163,4 +166,4 @@ def test_image_message_memory_disabled_skips_retrieval():
 
 def test_image_message_memory_enabled_reads_memories():
     db, _ = _run_image_with_mocks({"id": "user-1", "memory_enabled": True})
-    db.get_relevant_memories.assert_called_once_with("user-1")
+    db.get_relevant_memories.assert_called_once_with("user-1", limit=10)

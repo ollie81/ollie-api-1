@@ -6,11 +6,12 @@
 
 from unittest.mock import patch
 
-from journey import get_journey
+from journey import get_journey, FREE_HIGHLIGHT_LIMIT, PREMIUM_HIGHLIGHT_LIMIT
 
 
 def _run(current_user, summary):
-    with patch("journey.OllieDB") as mock_db_cls:
+    with patch("journey.OllieDB") as mock_db_cls, \
+         patch("journey.is_premium_active", return_value=False):
         mock_db_cls.return_value.get_journey_summary.return_value = summary
         return get_journey(current_user=current_user)
 
@@ -70,8 +71,39 @@ def test_db_failure_returns_500_not_raw_exception():
     from fastapi import HTTPException
     import pytest
 
-    with patch("journey.OllieDB") as mock_db_cls:
+    with patch("journey.OllieDB") as mock_db_cls, \
+         patch("journey.is_premium_active", return_value=False):
         mock_db_cls.return_value.get_journey_summary.side_effect = Exception("db down")
         with pytest.raises(HTTPException) as exc_info:
             get_journey(current_user={"id": "user-1", "total_active_days": 0})
         assert exc_info.value.status_code == 500
+
+
+# ---- Premium: deeper highlight limit + is_premium field ----
+
+_EMPTY_SUMMARY = {"memory_count": 0, "active_goals": [], "completed_goals": [], "highlights": []}
+
+
+def test_free_user_gets_free_highlight_limit_and_is_premium_false():
+    with patch("journey.OllieDB") as mock_db_cls, \
+         patch("journey.is_premium_active", return_value=False):
+        mock_db_cls.return_value.get_journey_summary.return_value = _EMPTY_SUMMARY
+        result = get_journey(current_user={"id": "user-1", "total_active_days": 0})
+
+        assert result["is_premium"] is False
+        mock_db_cls.return_value.get_journey_summary.assert_called_once_with(
+            "user-1", highlight_limit=FREE_HIGHLIGHT_LIMIT,
+        )
+
+
+def test_premium_user_gets_deeper_highlight_limit_and_is_premium_true():
+    with patch("journey.OllieDB") as mock_db_cls, \
+         patch("journey.is_premium_active", return_value=True):
+        mock_db_cls.return_value.get_journey_summary.return_value = _EMPTY_SUMMARY
+        result = get_journey(current_user={"id": "user-1", "total_active_days": 0})
+
+        assert result["is_premium"] is True
+        mock_db_cls.return_value.get_journey_summary.assert_called_once_with(
+            "user-1", highlight_limit=PREMIUM_HIGHLIGHT_LIMIT,
+        )
+        assert PREMIUM_HIGHLIGHT_LIMIT > FREE_HIGHLIGHT_LIMIT

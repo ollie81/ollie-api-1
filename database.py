@@ -413,7 +413,7 @@ class OllieDB:
             "active_goals": goals.data if goals.data else []
         }
 
-    def get_journey_summary(self, user_id: str) -> dict:
+    def get_journey_summary(self, user_id: str, highlight_limit: int = 30) -> dict:
         """
         Everything the "Our Space" screen needs in one call: how
         many memories Ollie has (a count query, not a full fetch --
@@ -424,6 +424,11 @@ class OllieDB:
         facts that are more reference data than "a moment in our
         story" (those stay visible via the full Manage Memories
         list instead).
+
+        highlight_limit defaults to today's existing depth (30) --
+        journey.py raises it for Premium users, never lowers it for
+        anyone, so free-tier "Our Space" never loses anything it
+        already showed.
         """
         memory_count_result = self.supabase.table("memories") \
             .select("id", count="exact") \
@@ -449,7 +454,7 @@ class OllieDB:
             .in_("category", ["accomplishment", "struggle", "person", "event", "promise"]) \
             .order("importance", desc=True) \
             .order("created_at", desc=True) \
-            .limit(30) \
+            .limit(highlight_limit) \
             .execute()
         highlights = highlights_result.data or []
 

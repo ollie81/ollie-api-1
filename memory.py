@@ -233,10 +233,10 @@ def pick_chat_model(language: str, user_message: str, memory_block: str) -> str:
 # MEMORY CONTEXT BUILDER
 # ============================================================
 
-def build_memory_context(memories: list, context: dict) -> str:
+def build_memory_context(memories: list, context: dict, limit: int = 10) -> str:
     """
     Build structured memory block for LLM injection.
-    Prioritized, capped at top 10, formatted cleanly.
+    Prioritized, capped at top `limit` (default 10), formatted cleanly.
     Defensive against malformed input — never raises.
     """
     try:
@@ -245,12 +245,12 @@ def build_memory_context(memories: list, context: dict) -> str:
         memories = memories or []
         context = context or {}
 
-        # Sort by importance descending, take top 10
+        # Sort by importance descending, take top `limit`
         sorted_memories = sorted(
             memories,
             key=lambda m: m.get("importance", 1) if isinstance(m, dict) else 1,
             reverse=True
-        )[:10]
+        )[:limit]
 
         memory_lines = []
         for m in sorted_memories:
