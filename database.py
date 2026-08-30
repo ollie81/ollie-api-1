@@ -296,6 +296,51 @@ class OllieDB:
             .execute()
         return bool(result.data)
 
+    def get_memories_by_category(self, user_id: str, categories: list[str], since: datetime | None = None, limit: int = 10) -> list[dict]:
+        """
+        Used by the morning check-in to find anything recently
+        mentioned that got saved as an "event" memory (see
+        memory.py's categorized extraction) -- the connective tissue
+        behind "you said you had that test today". since, when
+        given, bounds the lookup to avoid resurfacing something
+        mentioned weeks ago as if it were happening now.
+        """
+        query = self.supabase.table("memories") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .eq("is_active", True) \
+            .in_("category", categories) \
+            .order("created_at", desc=True) \
+            .limit(limit)
+        if since:
+            query = query.gte("created_at", since.isoformat())
+        return query.execute().data or []
+
+    def get_mood_for_date(self, user_id: str, date_obj: date) -> dict | None:
+        """Read-only lookup for a specific past date -- see update_mood, which is today-only."""
+        result = self.supabase.table("moods") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .eq("date", date_obj.isoformat()) \
+            .execute()
+        return result.data[0] if result.data else None
+
+    def get_messages_since(self, user_id: str, since_utc: datetime, limit: int = 200) -> list[dict]:
+        """
+        Used by the nightly recap to ground itself in what was
+        ACTUALLY said today, rather than reconstructing the day from
+        scattered memory/mood/goal signals -- summarizing a real
+        transcript is the most reliable way to never fabricate.
+        """
+        response = self.supabase.table("conversations") \
+            .select("sender, message, created_at") \
+            .eq("user_id", user_id) \
+            .gte("created_at", since_utc.isoformat()) \
+            .order("created_at") \
+            .limit(limit) \
+            .execute()
+        return response.data or []
+
     def update_mood(self, user_id: str, mood: str, note: str = None):
         today = date.today().isoformat()
         existing = self.supabase.table("moods") \
