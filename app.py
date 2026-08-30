@@ -19,14 +19,18 @@ from event_scheduler import run_due_notifications
 from daily_message import run_daily_messages
 from settings import router as settings_router
 from journey import router as journey_router
+from database import purge_expired_account_deletions
 # ============================================================
-# SCHEDULER — checks for due event check-ins periodically, and
-# sweeps out expired refresh tokens once a day
+# SCHEDULER — checks for due event check-ins periodically, sweeps
+# out expired refresh tokens once a day, and carries out any account
+# deletion whose grace period has fully elapsed (see database.py's
+# ACCOUNT_DELETION_GRACE_DAYS)
 # ============================================================
 background_scheduler = BackgroundScheduler()
 background_scheduler.add_job(run_due_notifications, "interval", minutes=10)
 background_scheduler.add_job(run_daily_messages, "interval", minutes=15)
 background_scheduler.add_job(cleanup_expired_refresh_tokens, "interval", hours=24)
+background_scheduler.add_job(purge_expired_account_deletions, "interval", hours=24)
 
 
 @asynccontextmanager

@@ -2,11 +2,13 @@
 # DATABASE — OllieDB class + Supabase client
 # ============================================================
 
+import logging
 from supabase import create_client
 from datetime import datetime, date, timedelta, timezone
 from config import SUPABASE_URL, SUPABASE_KEY
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+logger = logging.getLogger("ollie.database")
 
 # Max rewarded-ad watches per user per day. Prevents someone
 # from bypassing the daily message limit indefinitely by
@@ -34,6 +36,14 @@ ESTIMATED_CHARS_PER_SECOND = 15
 # transcription finishes, the expensive part (Whisper) already
 # happened, so there'd be nothing left to gate.
 VOICE_INPUT_TRIAL_COST_SECONDS = 10
+
+# How long a requested account deletion stays undoable before it's
+# carried out for real -- see OllieDB.request_account_deletion,
+# purge_expired_account_deletions below, and auth.py's login routes
+# (logging back in during this window cancels it). Deliberately not
+# instant: an accidental or in-the-moment tap on "delete account"
+# shouldn't be unrecoverable the second it's confirmed.
+ACCOUNT_DELETION_GRACE_DAYS = 14
 
 
 def estimate_speech_seconds(text: str) -> int:
@@ -750,3 +760,62 @@ class OllieDB:
 
     def can_use_voice(self, user_id: str) -> bool:
         return self.get_voice_minutes_today(user_id) < 1.0
+
+    # ============================================================
+    # ACCOUNT DELETION — grace period, not instant. See settings.py's
+    # /delete-account route, purge_expired_account_deletions below,
+    # and auth.py's login routes (logging back in cancels it).
+    # ============================================================
+
+    def request_account_deletion(self, user_id: str) -> str:
+        """Starts the grace period; returns the ISO date deletion
+        actually happens if nothing cancels it first."""
+        requested_at = datetime.now(timezone.utc)
+        self.supabase.table("users").update({
+            "deletion_requested_at": requested_at.isoformat(),
+        }).eq("id", user_id).execute()
+        return (requested_at + timedelta(days=ACCOUNT_DELETION_GRACE_DAYS)).isoformat()
+
+    def delete_account(self, user_id: str) -> None:
+        """
+        Hard-deletes a user and everything they own. Explicit,
+        table-by-table -- doesn't lean on Supabase FK cascades
+        (several of these tables predate this app's migration files,
+        so their cascade config, if any, was never verified here).
+        Child tables first, users row last, so this is correct
+        whether or not cascades exist, and safe to re-run. Each
+        table is best-effort: one failing (e.g. crisis_flags/
+        moderation_flags, which may not exist in every deployment --
+        see chat.py) logs a warning but never blocks the rest.
+        """
+        for table in (
+            "conversations", "crisis_flags", "goals", "memories",
+            "message_usage", "moderation_flags", "moods", "notifications",
+            "refresh_tokens", "scheduled_events", "sessions",
+            "subscriptions", "user_interests", "voice_usage",
+        ):
+            try:
+                self.supabase.table(table).delete().eq("user_id", user_id).execute()
+            except Exception as e:
+                logger.warning(f"delete_account: could not clear {table} for user {user_id}: {e}")
+
+        self.supabase.table("users").delete().eq("id", user_id).execute()
+
+
+def purge_expired_account_deletions() -> None:
+    """
+    Scheduled daily (see app.py) -- module-level, not an OllieDB
+    method, matching auth.cleanup_expired_refresh_tokens' shape:
+    both are scheduler entry points with no per-request user_id.
+    Anyone whose grace period has fully elapsed is permanently
+    deleted; everyone else's deletion_requested_at is left alone.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=ACCOUNT_DELETION_GRACE_DAYS)).isoformat()
+    due = supabase.table("users") \
+        .select("id") \
+        .not_.is_("deletion_requested_at", "null") \
+        .lte("deletion_requested_at", cutoff) \
+        .execute()
+    db = OllieDB()
+    for row in due.data or []:
+        db.delete_account(row["id"])
