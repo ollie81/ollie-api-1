@@ -28,3 +28,19 @@ alter table users
 
 alter table users
   add column if not exists email_otp_expires_at timestamptz;
+
+-- Pending signup verification, BEFORE a users row exists. Keeping
+-- this separate from `users` (rather than creating an unverified
+-- users row at request-otp time) means an abandoned signup attempt
+-- can never permanently squat an email address -- see auth.py's
+-- request_email_signup_otp / email_signup for the security
+-- rationale (mirrors what Twilio Verify already does for phone,
+-- just self-managed since there's no email equivalent in use here).
+create table if not exists email_signup_otps (
+  email text primary key,
+  otp_hash text not null,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+alter table email_signup_otps enable row level security;
