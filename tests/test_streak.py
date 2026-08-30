@@ -144,3 +144,52 @@ def test_remember_utc_offset_never_raises_on_db_failure():
     with patch("database.supabase") as mock_supabase:
         mock_supabase.table.side_effect = Exception("db down")
         OllieDB().remember_utc_offset("user-1", 60)  # must not raise
+
+
+# ---- total_active_days -- lifetime distinct-day count backing the
+# relationship-stage signal (see relationship.py). Unlike the
+# streak, this must never reset on a missed day. ----
+
+def test_first_ever_message_sets_total_active_days_to_one():
+    with patch("database.supabase") as mock_supabase:
+        _patch_user_row(mock_supabase, {"current_streak": 0, "last_streak_date": None, "total_active_days": 0})
+
+        OllieDB().update_streak("user-1", utc_offset_minutes=0)
+
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["total_active_days"] == 1
+
+
+def test_missed_day_still_increments_total_active_days_even_though_streak_resets():
+    two_days_ago = _today_utc() - timedelta(days=2)
+    with patch("database.supabase") as mock_supabase:
+        _patch_user_row(mock_supabase, {
+            "current_streak": 12, "last_streak_date": two_days_ago.isoformat(), "total_active_days": 12,
+        })
+
+        streak = OllieDB().update_streak("user-1", utc_offset_minutes=0)
+
+        assert streak == 1  # streak resets
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["total_active_days"] == 13  # but lifetime count never resets
+
+
+def test_already_credited_today_does_not_double_count_total_active_days():
+    with patch("database.supabase") as mock_supabase:
+        _patch_user_row(mock_supabase, {
+            "current_streak": 5, "last_streak_date": _today_utc().isoformat(), "total_active_days": 20,
+        })
+
+        OllieDB().update_streak("user-1", utc_offset_minutes=0)
+
+        mock_supabase.table.return_value.update.assert_not_called()
+
+
+def test_total_active_days_missing_defaults_to_zero_before_incrementing():
+    with patch("database.supabase") as mock_supabase:
+        _patch_user_row(mock_supabase, {"current_streak": 0, "last_streak_date": None})
+
+        OllieDB().update_streak("user-1", utc_offset_minutes=0)
+
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["total_active_days"] == 1

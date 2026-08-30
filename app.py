@@ -18,6 +18,7 @@ from notifications import router as notifications_router
 from event_scheduler import run_due_notifications
 from daily_message import send_daily_messages
 from settings import router as settings_router
+from journey import router as journey_router
 # ============================================================
 # SCHEDULER — checks for due event check-ins periodically, and
 # sweeps out expired refresh tokens once a day
@@ -59,6 +60,7 @@ app.include_router(chat_router)
 app.include_router(premium_router, prefix="/premium")
 app.include_router(notifications_router, prefix="/notifications")
 app.include_router(settings_router, prefix="/settings")
+app.include_router(journey_router, prefix="/journey")
 
 @app.get("/")
 def root():
