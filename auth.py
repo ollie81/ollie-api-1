@@ -15,7 +15,7 @@ from google.auth.transport import requests as google_requests
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -105,7 +105,7 @@ class EmailResetRequest(BaseModel):
 def create_access_token(user_id: str) -> str:
     payload = {
         "sub": user_id,
-        "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         "type": "access"
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -203,7 +203,7 @@ def _check_age_gate(date_of_birth: str | None) -> str | None:
         dob = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
     except ValueError:
         return "Invalid date_of_birth format, expected YYYY-MM-DD"
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
     if age < MIN_SIGNUP_AGE_YEARS:
         return f"You must be at least {MIN_SIGNUP_AGE_YEARS} years old to create an account"
@@ -284,7 +284,7 @@ def signup(req: SignupRequest, request: Request):
         supabase.table("refresh_tokens").insert({
             "user_id": user_id,
             "token_hash": hashed_refresh,
-            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
         }).execute()
 
         return {
@@ -319,7 +319,7 @@ def login(req: AuthRequest, request: Request):
         supabase.table("refresh_tokens").insert({
             "user_id": user_id,
             "token_hash": hashed_refresh,
-            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
         }).execute()
 
         return {
@@ -344,7 +344,7 @@ def refresh_token(req: RefreshRequest):
 
     token_row = result.data[0]
     expires_at = datetime.fromisoformat(token_row["expires_at"])
-    if datetime.utcnow() > expires_at:
+    if datetime.now(timezone.utc) > expires_at:
         supabase.table("refresh_tokens").delete().eq("token_hash", hashed).execute()
         raise HTTPException(status_code=401, detail="Refresh token expired")
 
@@ -358,7 +358,7 @@ def refresh_token(req: RefreshRequest):
     supabase.table("refresh_tokens").insert({
         "user_id": user_id,
         "token_hash": new_hashed,
-        "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
     }).execute()
 
     return {
@@ -375,7 +375,7 @@ def cleanup_expired_refresh_tokens() -> None:
     sit in the table forever without this.
     """
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         supabase.table("refresh_tokens").delete().lt("expires_at", now).execute()
     except Exception as e:
         logger.error(f"cleanup_expired_refresh_tokens failed: {e}")
@@ -412,7 +412,7 @@ def forgot_password(req: ForgotRequest, request: Request):
         # Store verification SID in Supabase
         supabase.table("users").update({
             "otp_sid": verification.sid,
-            "otp_expires_at": (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+            "otp_expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
         }).eq("phone", req.phone_number).execute()
 
         return {"success": True, "message": "OTP sent via SMS"}
@@ -501,7 +501,7 @@ def google_login(req: GoogleAuthRequest, request: Request):
         supabase.table("refresh_tokens").insert({
             "user_id": user_id,
             "token_hash": hashed_refresh,
-            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
         }).execute()
 
         return {
@@ -555,7 +555,7 @@ def request_email_signup_otp(req: EmailSignupOtpRequest, request: Request):
         supabase.table("email_signup_otps").upsert({
             "email": email,
             "otp_hash": _hash_otp(code),
-            "expires_at": (datetime.utcnow() + timedelta(minutes=EMAIL_OTP_EXPIRE_MINUTES)).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=EMAIL_OTP_EXPIRE_MINUTES)).isoformat(),
         }).execute()
 
         return {"success": True, "message": "OTP sent via email"}
@@ -585,7 +585,7 @@ def email_signup(req: EmailSignupRequest, request: Request):
             raise HTTPException(status_code=400, detail="No pending verification for this email -- request a new code")
 
         row = pending.data[0]
-        if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+        if datetime.now(timezone.utc) > datetime.fromisoformat(row["expires_at"]):
             supabase.table("email_signup_otps").delete().eq("email", email).execute()
             raise HTTPException(status_code=400, detail="Code expired, please request a new one")
 
@@ -612,7 +612,7 @@ def email_signup(req: EmailSignupRequest, request: Request):
         supabase.table("refresh_tokens").insert({
             "user_id": user_id,
             "token_hash": hashed_refresh,
-            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
         }).execute()
 
         return {
@@ -649,7 +649,7 @@ def email_login(req: EmailAuthRequest, request: Request):
         supabase.table("refresh_tokens").insert({
             "user_id": user_id,
             "token_hash": hashed_refresh,
-            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
         }).execute()
 
         return {
@@ -680,7 +680,7 @@ def email_forgot_password(req: EmailForgotRequest, request: Request):
 
         supabase.table("users").update({
             "email_otp_hash": _hash_otp(code),
-            "email_otp_expires_at": (datetime.utcnow() + timedelta(minutes=EMAIL_OTP_EXPIRE_MINUTES)).isoformat(),
+            "email_otp_expires_at": (datetime.now(timezone.utc) + timedelta(minutes=EMAIL_OTP_EXPIRE_MINUTES)).isoformat(),
         }).eq("email", email).execute()
 
         return {"success": True, "message": "OTP sent via email"}
@@ -703,7 +703,7 @@ def email_reset_password(req: EmailResetRequest, request: Request):
 
         if not user.get("email_otp_hash") or not user.get("email_otp_expires_at"):
             raise HTTPException(status_code=400, detail="No pending reset for this email -- request a new code")
-        if datetime.utcnow() > datetime.fromisoformat(user["email_otp_expires_at"]):
+        if datetime.now(timezone.utc) > datetime.fromisoformat(user["email_otp_expires_at"]):
             raise HTTPException(status_code=400, detail="Code expired, please request a new one")
         if _hash_otp(req.otp) != user["email_otp_hash"]:
             raise HTTPException(status_code=400, detail="Invalid code")
