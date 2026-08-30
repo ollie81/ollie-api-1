@@ -18,6 +18,7 @@ from modes import MODE_OPENER_FALLBACKS
 
 def test_generation_success_is_used_as_is(mock_chat_completion):
     with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
          patch("chat.openai_client.chat.completions.create",
                return_value=mock_chat_completion("hey! what are we studying today?")), \
          patch("chat.moderate_text", return_value=None):
@@ -30,7 +31,8 @@ def test_generation_success_is_used_as_is(mock_chat_completion):
 
 
 def test_generation_failure_falls_back_to_mode_specific_line():
-    with patch("chat.OllieDB") as mock_db_cls:
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False):
         mock_db_cls.return_value.get_relevant_memories.side_effect = Exception("boom")
 
         import chat
@@ -40,6 +42,7 @@ def test_generation_failure_falls_back_to_mode_specific_line():
 
 def test_flagged_generation_falls_back(mock_chat_completion):
     with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
          patch("chat.openai_client.chat.completions.create",
                return_value=mock_chat_completion("something flagged")), \
          patch("chat.moderate_text", return_value={"categories": ["x"]}):

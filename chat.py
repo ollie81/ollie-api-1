@@ -77,6 +77,19 @@ class ModeStarterRequest(BaseModel):
     utc_offset_minutes: int | None = None
 
 # ============================================================
+# MEMORY RECALL DEPTH — how many memories Ollie draws on per
+# reply. Free tier keeps today's existing depth exactly (10 was
+# already build_memory_context's hardcoded cap); Premium sees
+# roughly double -- genuinely richer recall, not a new mechanic,
+# see is_premium_active in premium.py. Applied everywhere Ollie
+# speaks from memory: regular chat, image reactions, and "Do It
+# With Me" openers.
+# ============================================================
+
+MEMORY_RECALL_LIMIT_FREE = 10
+MEMORY_RECALL_LIMIT_PREMIUM = 20
+
+# ============================================================
 # PROMPT BUILDER
 # ============================================================
 
@@ -313,9 +326,10 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     # adding new ones.
     memory_enabled = current_user.get("memory_enabled") is not False
     if memory_enabled:
-        memories = db.get_relevant_memories(user_id)
+        recall_limit = MEMORY_RECALL_LIMIT_PREMIUM if is_premium_active(user_id) else MEMORY_RECALL_LIMIT_FREE
+        memories = db.get_relevant_memories(user_id, limit=recall_limit)
         context = db.get_user_context(user_id)
-        memory_block = build_memory_context(memories, context)
+        memory_block = build_memory_context(memories, context, limit=recall_limit)
     else:
         context = {}
         memory_block = ""
@@ -566,9 +580,10 @@ def _generate_mode_opener(user_id: str, mode: str, current_user: dict, utc_offse
     db = OllieDB()
     try:
         if current_user.get("memory_enabled") is not False:
-            memories = db.get_relevant_memories(user_id)
+            recall_limit = MEMORY_RECALL_LIMIT_PREMIUM if is_premium_active(user_id) else MEMORY_RECALL_LIMIT_FREE
+            memories = db.get_relevant_memories(user_id, limit=recall_limit)
             context = db.get_user_context(user_id)
-            memory_block = build_memory_context(memories, context)
+            memory_block = build_memory_context(memories, context, limit=recall_limit)
         else:
             memory_block = ""
 
@@ -705,9 +720,10 @@ def _process_image_message(
     # Same memory-toggle respect as the text pipeline -- see
     # _process_chat_message.
     if current_user.get("memory_enabled") is not False:
-        memories = db.get_relevant_memories(user_id)
+        recall_limit = MEMORY_RECALL_LIMIT_PREMIUM if is_premium_active(user_id) else MEMORY_RECALL_LIMIT_FREE
+        memories = db.get_relevant_memories(user_id, limit=recall_limit)
         context = db.get_user_context(user_id)
-        memory_block = build_memory_context(memories, context)
+        memory_block = build_memory_context(memories, context, limit=recall_limit)
     else:
         memory_block = ""
 

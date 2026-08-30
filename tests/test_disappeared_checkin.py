@@ -195,6 +195,38 @@ def test_normal_frequency_processes_all_three():
         mock_disappeared.assert_called_once()
 
 
+# ---- "frequent" is Premium-only: self-healing downgrade ----
+
+def test_frequent_downgrades_to_normal_for_non_premium_user():
+    row = _base_row(notification_frequency="frequent")
+    with patch("daily_message.supabase") as mock_supabase, \
+         patch("daily_message._process_morning_checkin"), \
+         patch("daily_message._process_nightly_recap"), \
+         patch("daily_message._process_disappeared_checkin") as mock_disappeared, \
+         patch("daily_message.is_premium_active", return_value=False):
+        mock_supabase.table.return_value.select.return_value.not_.is_.return_value.not_.is_.return_value.execute.return_value = \
+            MagicMock(data=[row])
+        run_daily_messages()
+
+        mock_disappeared.assert_called_once()
+        assert mock_disappeared.call_args[0][2] == "normal"
+
+
+def test_frequent_stays_frequent_for_premium_user():
+    row = _base_row(notification_frequency="frequent")
+    with patch("daily_message.supabase") as mock_supabase, \
+         patch("daily_message._process_morning_checkin"), \
+         patch("daily_message._process_nightly_recap"), \
+         patch("daily_message._process_disappeared_checkin") as mock_disappeared, \
+         patch("daily_message.is_premium_active", return_value=True):
+        mock_supabase.table.return_value.select.return_value.not_.is_.return_value.not_.is_.return_value.execute.return_value = \
+            MagicMock(data=[row])
+        run_daily_messages()
+
+        mock_disappeared.assert_called_once()
+        assert mock_disappeared.call_args[0][2] == "frequent"
+
+
 def test_missing_frequency_defaults_to_normal_behavior():
     row = _base_row()
     del row["notification_frequency"]

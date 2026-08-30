@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from database import supabase, OllieDB
 from auth import get_current_user
+from premium import is_premium_active
 
 logger = logging.getLogger("ollie.settings")
 
@@ -115,7 +116,15 @@ def update_notification_frequency(
     so a single control genuinely means no push at all, matching
     what picking "Off" implies. Reminders (explicit user requests)
     are a separate concern and always send regardless of this.
+
+    "frequent" is Premium-only -- free tier still has off/low/normal,
+    nothing is taken away, this just gates the extra-eager tier.
+    run_daily_messages also treats a previously-saved "frequent" as
+    "normal" for a user who isn't premium (e.g. a lapsed trial), so
+    this write-time check isn't the only thing enforcing it.
     """
+    if req.frequency == "frequent" and not is_premium_active(current_user["id"]):
+        raise HTTPException(status_code=402, detail="Frequent check-ins are an Ollie Premium feature")
     try:
         supabase.table("users").update({
             "notification_frequency": req.frequency,
