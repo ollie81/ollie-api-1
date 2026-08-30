@@ -30,6 +30,7 @@ from auth import (
     EmailResetRequest,
     hash_password,
     _hash_otp,
+    _email_identity_taken,
 )
 
 
@@ -76,6 +77,54 @@ def test_request_otp_rejects_already_registered_email():
         mock_send.assert_not_called()
 
 
+def test_request_otp_rejects_email_already_used_for_google_signin():
+    # Google sign-in stores a verified email in the `phone` column
+    # (see google_login), not `email` -- someone who already has a
+    # Google account with this address must be blocked here too, or
+    # they'd end up with a second, disconnected account under the
+    # same email.
+    with patch("auth.supabase") as mock_supabase, \
+         patch("auth.send_otp_email") as mock_send:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
+            _mock_result([]),               # not found by email
+            _mock_result([{"id": "user-1"}]),  # found by phone -- a Google account
+        ]
+
+        with pytest.raises(HTTPException) as exc_info:
+            request_email_signup_otp(EmailSignupOtpRequest(email="google-user@example.com"), _fake_request())
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "User already exists"
+        mock_send.assert_not_called()
+
+
+# ---- _email_identity_taken ----
+
+def test_identity_taken_true_when_found_by_email():
+    with patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
+            _mock_result([{"id": "user-1"}]),
+        ]
+        assert _email_identity_taken("a@example.com") is True
+
+
+def test_identity_taken_true_when_found_by_phone_only():
+    with patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
+            _mock_result([]),
+            _mock_result([{"id": "user-1"}]),
+        ]
+        assert _email_identity_taken("a@example.com") is True
+
+
+def test_identity_taken_false_when_found_in_neither():
+    with patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
+            _mock_result([]),
+            _mock_result([]),
+        ]
+        assert _email_identity_taken("a@example.com") is False
+
+
 def test_request_otp_rejects_malformed_email():
     with patch("auth.supabase") as mock_supabase, patch("auth.send_otp_email") as mock_send:
         with pytest.raises(HTTPException) as exc_info:
@@ -107,7 +156,8 @@ def test_signup_with_correct_code_creates_account_and_issues_tokens():
     future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
-            _mock_result([]),  # no existing user
+            _mock_result([]),  # no existing user by email
+            _mock_result([]),  # no existing user by phone (Google's identity column)
             _mock_result([{"email": "new@example.com", "otp_hash": _hash_otp("123456"), "expires_at": future}]),
         ]
         mock_supabase.table.return_value.insert.return_value.execute.return_value = \
@@ -132,12 +182,14 @@ def test_signup_with_wrong_code_is_rejected_and_account_not_created():
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
             _mock_result([]),
+            _mock_result([]),
             _mock_result([{"email": "new@example.com", "otp_hash": _hash_otp("123456"), "expires_at": future}]),
         ]
 
         with pytest.raises(HTTPException) as exc_info:
             email_signup(_signup_req(otp="000000"), _fake_request())
         assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Invalid code"
         mock_supabase.table.return_value.insert.assert_not_called()
 
 
@@ -146,12 +198,14 @@ def test_signup_with_expired_code_is_rejected_and_cleaned_up():
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
             _mock_result([]),
+            _mock_result([]),
             _mock_result([{"email": "new@example.com", "otp_hash": _hash_otp("123456"), "expires_at": past}]),
         ]
 
         with pytest.raises(HTTPException) as exc_info:
             email_signup(_signup_req(), _fake_request())
         assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Code expired, please request a new one"
         mock_supabase.table.return_value.insert.assert_not_called()
         mock_supabase.table.return_value.delete.return_value.eq.assert_called_once()
 
@@ -160,12 +214,14 @@ def test_signup_with_no_pending_otp_is_rejected():
     with patch("auth.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
             _mock_result([]),
+            _mock_result([]),
             _mock_result([]),  # never requested a code
         ]
 
         with pytest.raises(HTTPException) as exc_info:
             email_signup(_signup_req(), _fake_request())
         assert exc_info.value.status_code == 400
+        assert "No pending verification" in exc_info.value.detail
         mock_supabase.table.return_value.insert.assert_not_called()
 
 
