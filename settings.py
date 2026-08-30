@@ -43,6 +43,16 @@ class DisplayNameRequest(BaseModel):
     name: str
 
 
+class DeleteAccountRequest(BaseModel):
+    confirmation: str
+
+
+# Typed into the Delete Account screen before the button even
+# enables client-side -- checked again here since the client-side
+# gate is just UX, not something the server can trust on its own.
+DELETE_ACCOUNT_CONFIRMATION_PHRASE = "DELETE"
+
+
 # ============================================================
 # USAGE — how many free messages used today, plan status
 # ============================================================
@@ -272,24 +282,26 @@ def clear_memory(current_user: dict = Depends(get_current_user)):
 
 
 # ============================================================
-# DELETE ACCOUNT — permanent, cascades to related data
+# DELETE ACCOUNT — requested, not instant. Starts a grace period
+# (OllieDB.request_account_deletion / ACCOUNT_DELETION_GRACE_DAYS)
+# instead of deleting anything right now: logging back in before it
+# elapses cancels it (see auth.py's login routes), and a scheduled
+# job (database.purge_expired_account_deletions, wired up in app.py)
+# carries out anyone whose window has actually run out. Deliberately
+# not a single confirm-and-it's-gone action.
 # ============================================================
 
-@router.delete("/account")
-def delete_account(current_user: dict = Depends(get_current_user)):
-    """
-    Deletes the user row. Relies on ON DELETE CASCADE foreign
-    keys (conversations, memories, user_interests, sessions,
-    scheduled_events, subscriptions, refresh_tokens, ad_bonus,
-    notifications, message_usage, moods, goals) all referencing
-    users(id) — verify these cascades exist in Supabase, since a
-    failed cascade would leave orphaned rows for a deleted user.
-    """
+@router.post("/delete-account")
+def request_delete_account(req: DeleteAccountRequest, current_user: dict = Depends(get_current_user)):
+    if req.confirmation.strip() != DELETE_ACCOUNT_CONFIRMATION_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Type "{DELETE_ACCOUNT_CONFIRMATION_PHRASE}" exactly to confirm',
+        )
     try:
-        user_id = current_user["id"]
-        supabase.table("refresh_tokens").delete().eq("user_id", user_id).execute()
-        supabase.table("users").delete().eq("id", user_id).execute()
-        return {"success": True, "message": "Account deleted"}
+        db = OllieDB()
+        scheduled_for = db.request_account_deletion(current_user["id"])
+        return {"success": True, "scheduled_for": scheduled_for}
     except Exception as e:
-        logger.error(f"delete_account failed for user {current_user.get('id')}: {e}")
-        raise HTTPException(status_code=500, detail="Could not delete account")
+        logger.error(f"request_delete_account failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not schedule account deletion")

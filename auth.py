@@ -153,6 +153,23 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="User not found")
     return result.data[0]
 
+def _cancel_pending_deletion_if_needed(user: dict) -> bool:
+    """
+    Account deletion has a grace period (see database.py's
+    ACCOUNT_DELETION_GRACE_DAYS) rather than happening the instant
+    it's requested. Logging back in during that window is treated
+    as changing your mind -- same effect as a dedicated "keep my
+    account" button, without needing one: whichever of the three
+    sign-in methods they used to prove it's really them is already
+    enough. Deliberately doesn't block the login itself either way --
+    a pending deletion isn't a reason to lock someone out of their
+    own account, just a scheduled outcome they can still walk back.
+    """
+    if not user.get("deletion_requested_at"):
+        return False
+    supabase.table("users").update({"deletion_requested_at": None}).eq("id", user["id"]).execute()
+    return True
+
 # ============================================================
 # PASSWORD HELPERS
 # ============================================================
@@ -311,6 +328,8 @@ def login(req: AuthRequest, request: Request):
         if not verify_password(req.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
+        deletion_cancelled = _cancel_pending_deletion_if_needed(user)
+
         user_id = user["id"]
         access_token = create_access_token(user_id)
         refresh_token = create_refresh_token()
@@ -326,7 +345,8 @@ def login(req: AuthRequest, request: Request):
             "success": True,
             "access_token": access_token,
             "refresh_token": refresh_token,
-            "token_type": "bearer"
+            "token_type": "bearer",
+            "deletion_cancelled": deletion_cancelled,
         }
     except HTTPException:
         raise
@@ -486,6 +506,7 @@ def google_login(req: GoogleAuthRequest, request: Request):
         is_new_user = not existing.data
         if existing.data:
             user = existing.data[0]
+            deletion_cancelled = _cancel_pending_deletion_if_needed(user)
         else:
             result = supabase.table("users").insert({
                 "username": name,
@@ -493,6 +514,7 @@ def google_login(req: GoogleAuthRequest, request: Request):
                 "password_hash": ""
             }).execute()
             user = result.data[0]
+            deletion_cancelled = False
 
         user_id = user["id"]
         access_token = create_access_token(user_id)
@@ -514,6 +536,7 @@ def google_login(req: GoogleAuthRequest, request: Request):
             # time, not on every subsequent Google login.
             "is_new_user": is_new_user,
             "username": user.get("username"),
+            "deletion_cancelled": deletion_cancelled,
         }
     except Exception as e:
         logger.warning(f"google_login failed: {e}")
@@ -666,6 +689,8 @@ def email_login(req: EmailAuthRequest, request: Request):
         if not verify_password(req.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
+        deletion_cancelled = _cancel_pending_deletion_if_needed(user)
+
         user_id = user["id"]
         access_token = create_access_token(user_id)
         refresh_token = create_refresh_token()
@@ -681,7 +706,8 @@ def email_login(req: EmailAuthRequest, request: Request):
             "success": True,
             "access_token": access_token,
             "refresh_token": refresh_token,
-            "token_type": "bearer"
+            "token_type": "bearer",
+            "deletion_cancelled": deletion_cancelled,
         }
     except HTTPException:
         raise
