@@ -118,7 +118,35 @@ def is_premium_active(user_id: str) -> bool:
 
 @router.get("/status")
 def premium_status(current_user: dict = Depends(get_current_user)):
-    return {"is_premium": is_premium_active(current_user["id"])}
+    """
+    is_premium_active already re-verifies with Play and updates the
+    stored row when needed, so re-reading `subscriptions` afterward
+    reflects that fresh state, not a stale one. product_id/
+    expiry_time_millis are returned raw -- the client already owns
+    the full set of product IDs (purchase_service.dart) and picks
+    its own display label (Monthly/Yearly/Lifetime) and renewal-date
+    formatting from them; the backend doesn't need to know or care
+    about that distinction, same as it never has for verification.
+    """
+    user_id = current_user["id"]
+    is_premium = is_premium_active(user_id)
+    if not is_premium:
+        return {"is_premium": False, "product_id": None, "expiry_time_millis": None}
+
+    result = supabase.table("subscriptions") \
+        .select("product_id, expiry_time_millis") \
+        .eq("user_id", user_id) \
+        .eq("status", "active") \
+        .execute()
+    sub = result.data[0] if result.data else {}
+
+    return {
+        "is_premium": True,
+        "product_id": sub.get("product_id"),
+        # 0/absent means no expiry (lifetime) -- normalize to null so
+        # the client doesn't have to special-case a magic zero.
+        "expiry_time_millis": sub.get("expiry_time_millis") or None,
+    }
 
 
 @router.post("/activate")
