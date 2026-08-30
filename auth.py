@@ -2,6 +2,7 @@
 # ============================================================
 import hashlib
 import logging
+import re
 import secrets
 import random
 import bcrypt
@@ -24,6 +25,7 @@ from config import (
     REFRESH_TOKEN_EXPIRE_DAYS
 )
 from database import supabase
+from email_service import send_otp_email
 
 router = APIRouter()
 limiter = Limiter(key_func=get_remote_address)
@@ -75,6 +77,27 @@ class LogoutRequest(BaseModel):
 class FCMTokenRequest(BaseModel):
     fcm_token: str
 
+class EmailSignupOtpRequest(BaseModel):
+    email: str
+
+class EmailSignupRequest(BaseModel):
+    email: str
+    password: str
+    otp: str
+    date_of_birth: str | None = None
+
+class EmailAuthRequest(BaseModel):
+    email: str
+    password: str
+
+class EmailForgotRequest(BaseModel):
+    email: str
+
+class EmailResetRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
 # ============================================================
 # JWT HELPERS
 # ============================================================
@@ -92,6 +115,24 @@ def create_refresh_token() -> str:
 
 def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+# ============================================================
+# EMAIL OTP HELPERS — email signup/reset generate and verify
+# their own 6-digit code (see email_service.py), unlike phone
+# which hands that entirely to Twilio Verify. Only ever the hash
+# is stored, same principle as hash_refresh_token above.
+# ============================================================
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+def _is_valid_email(email: str) -> bool:
+    return bool(_EMAIL_RE.match(email.strip()))
+
+def _generate_otp_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+def _hash_otp(code: str) -> str:
+    return hashlib.sha256(code.strip().encode()).hexdigest()
 
 def verify_access_token(token: str) -> dict:
     try:
@@ -472,6 +513,215 @@ def google_login(req: GoogleAuthRequest, request: Request):
     except Exception as e:
         logger.warning(f"google_login failed: {e}")
         raise HTTPException(status_code=401, detail="Google sign-in failed")
+
+# ============================================================
+# EMAIL LOGIN — a third sign-in method alongside phone and Google.
+# Uses its own `email` column (migration 014) rather than the
+# `phone` column Google reuses for its identity key -- Google
+# already writes every existing Google user's email into `phone`,
+# so changing that lookup now would split returning Google users
+# into duplicate accounts. get_current_user, /refresh, and /logout
+# are completely unchanged and need no changes here -- they only
+# ever key off the user's id, never how they signed in.
+#
+# Signup mirrors phone's two-step OTP shape, but since there's no
+# Twilio-Verify-equivalent product for email, this app generates
+# its own 6-digit code and verifies it itself (see email_service.py,
+# _generate_otp_code/_hash_otp above). The pending code lives in
+# email_signup_otps, NOT on a users row -- no account exists until
+# the code is confirmed, so an abandoned signup attempt can never
+# permanently squat someone else's email address.
+# ============================================================
+
+EMAIL_OTP_EXPIRE_MINUTES = 10
+
+
+@router.post("/email/signup/request-otp")
+@limiter.limit("5/minute")
+def request_email_signup_otp(req: EmailSignupOtpRequest, request: Request):
+    email = req.email.strip().lower()
+    if not _is_valid_email(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+
+    try:
+        existing = supabase.table("users").select("id").eq("email", email).execute()
+        if existing.data:
+            raise HTTPException(status_code=400, detail="User already exists")
+
+        code = _generate_otp_code()
+        if not send_otp_email(email, code, purpose="verify"):
+            raise HTTPException(status_code=500, detail="Could not send verification code, please try again")
+
+        supabase.table("email_signup_otps").upsert({
+            "email": email,
+            "otp_hash": _hash_otp(code),
+            "expires_at": (datetime.utcnow() + timedelta(minutes=EMAIL_OTP_EXPIRE_MINUTES)).isoformat(),
+        }).execute()
+
+        return {"success": True, "message": "OTP sent via email"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"request_email_signup_otp failed for {email}: {e}")
+        raise HTTPException(status_code=500, detail="Could not send OTP, please try again")
+
+
+@router.post("/email/signup")
+@limiter.limit("5/minute")
+def email_signup(req: EmailSignupRequest, request: Request):
+    """Step 2 of email signup: verify the staged code, then create the account."""
+    email = req.email.strip().lower()
+    try:
+        existing = supabase.table("users").select("id").eq("email", email).execute()
+        if existing.data:
+            raise HTTPException(status_code=400, detail="User already exists")
+
+        age_gate_error = _check_age_gate(req.date_of_birth)
+        if age_gate_error:
+            raise HTTPException(status_code=400, detail=age_gate_error)
+
+        pending = supabase.table("email_signup_otps").select("*").eq("email", email).execute()
+        if not pending.data:
+            raise HTTPException(status_code=400, detail="No pending verification for this email -- request a new code")
+
+        row = pending.data[0]
+        if datetime.utcnow() > datetime.fromisoformat(row["expires_at"]):
+            supabase.table("email_signup_otps").delete().eq("email", email).execute()
+            raise HTTPException(status_code=400, detail="Code expired, please request a new one")
+
+        if _hash_otp(req.otp) != row["otp_hash"]:
+            raise HTTPException(status_code=400, detail="Invalid code")
+
+        supabase.table("email_signup_otps").delete().eq("email", email).execute()
+
+        user_data = {
+            "username": email,
+            "email": email,
+            "email_verified": True,
+            "password_hash": hash_password(req.password),
+        }
+        if req.date_of_birth:
+            user_data["date_of_birth"] = req.date_of_birth
+        result = supabase.table("users").insert(user_data).execute()
+
+        user_id = result.data[0]["id"]
+        access_token = create_access_token(user_id)
+        refresh_token = create_refresh_token()
+        hashed_refresh = hash_refresh_token(refresh_token)
+
+        supabase.table("refresh_tokens").insert({
+            "user_id": user_id,
+            "token_hash": hashed_refresh,
+            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+        }).execute()
+
+        return {
+            "success": True,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"email_signup failed for {email}: {e}")
+        raise HTTPException(status_code=500, detail="Could not create account, please try again")
+
+
+@router.post("/email/login")
+@limiter.limit("10/minute")
+def email_login(req: EmailAuthRequest, request: Request):
+    email = req.email.strip().lower()
+    try:
+        result = supabase.table("users").select("*").eq("email", email).execute()
+        if not result.data:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        user = result.data[0]
+        if not verify_password(req.password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        user_id = user["id"]
+        access_token = create_access_token(user_id)
+        refresh_token = create_refresh_token()
+        hashed_refresh = hash_refresh_token(refresh_token)
+
+        supabase.table("refresh_tokens").insert({
+            "user_id": user_id,
+            "token_hash": hashed_refresh,
+            "expires_at": (datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+        }).execute()
+
+        return {
+            "success": True,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"email_login failed for {email}: {e}")
+        raise HTTPException(status_code=500, detail="Could not log in, please try again")
+
+
+@router.post("/email/forgot")
+@limiter.limit("3/minute")
+def email_forgot_password(req: EmailForgotRequest, request: Request):
+    email = req.email.strip().lower()
+    try:
+        result = supabase.table("users").select("id").eq("email", email).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        code = _generate_otp_code()
+        if not send_otp_email(email, code, purpose="reset"):
+            raise HTTPException(status_code=500, detail="Could not send verification code, please try again")
+
+        supabase.table("users").update({
+            "email_otp_hash": _hash_otp(code),
+            "email_otp_expires_at": (datetime.utcnow() + timedelta(minutes=EMAIL_OTP_EXPIRE_MINUTES)).isoformat(),
+        }).eq("email", email).execute()
+
+        return {"success": True, "message": "OTP sent via email"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"email_forgot_password failed for {email}: {e}")
+        raise HTTPException(status_code=500, detail="Could not send OTP, please try again")
+
+
+@router.post("/email/reset")
+@limiter.limit("5/minute")
+def email_reset_password(req: EmailResetRequest, request: Request):
+    email = req.email.strip().lower()
+    try:
+        result = supabase.table("users").select("*").eq("email", email).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        user = result.data[0]
+
+        if not user.get("email_otp_hash") or not user.get("email_otp_expires_at"):
+            raise HTTPException(status_code=400, detail="No pending reset for this email -- request a new code")
+        if datetime.utcnow() > datetime.fromisoformat(user["email_otp_expires_at"]):
+            raise HTTPException(status_code=400, detail="Code expired, please request a new one")
+        if _hash_otp(req.otp) != user["email_otp_hash"]:
+            raise HTTPException(status_code=400, detail="Invalid code")
+
+        supabase.table("users").update({
+            "password_hash": hash_password(req.new_password),
+            "email_otp_hash": None,
+            "email_otp_expires_at": None,
+        }).eq("email", email).execute()
+
+        supabase.table("refresh_tokens").delete().eq("user_id", user["id"]).execute()
+
+        return {"success": True, "message": "Password reset successful"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"email_reset_password failed for {email}: {e}")
+        raise HTTPException(status_code=500, detail="Could not reset password, please try again")
 
 # ============================================================
 # FCM TOKEN
