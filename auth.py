@@ -536,6 +536,28 @@ def google_login(req: GoogleAuthRequest, request: Request):
 EMAIL_OTP_EXPIRE_MINUTES = 10
 
 
+def _email_identity_taken(email: str) -> bool:
+    """
+    True if any existing user already has this email as their
+    identity -- either in the `email` column (an email/password
+    account) or in `phone` (where Google sign-in stores a verified
+    email, see google_login). Without checking both, someone who
+    already signed in with Google using this address could sign up
+    again with email/password and silently end up with a second,
+    disconnected account under the same email.
+
+    Two separate .eq() queries rather than a single .or_() filter --
+    building a raw PostgREST filter string from user input (which
+    .or_() requires) isn't worth the injection surface for saving
+    one round trip.
+    """
+    by_email = supabase.table("users").select("id").eq("email", email).execute()
+    if by_email.data:
+        return True
+    by_phone = supabase.table("users").select("id").eq("phone", email).execute()
+    return bool(by_phone.data)
+
+
 @router.post("/email/signup/request-otp")
 @limiter.limit("5/minute")
 def request_email_signup_otp(req: EmailSignupOtpRequest, request: Request):
@@ -544,8 +566,7 @@ def request_email_signup_otp(req: EmailSignupOtpRequest, request: Request):
         raise HTTPException(status_code=400, detail="Enter a valid email address")
 
     try:
-        existing = supabase.table("users").select("id").eq("email", email).execute()
-        if existing.data:
+        if _email_identity_taken(email):
             raise HTTPException(status_code=400, detail="User already exists")
 
         code = _generate_otp_code()
@@ -572,8 +593,7 @@ def email_signup(req: EmailSignupRequest, request: Request):
     """Step 2 of email signup: verify the staged code, then create the account."""
     email = req.email.strip().lower()
     try:
-        existing = supabase.table("users").select("id").eq("email", email).execute()
-        if existing.data:
+        if _email_identity_taken(email):
             raise HTTPException(status_code=400, detail="User already exists")
 
         age_gate_error = _check_age_gate(req.date_of_birth)
