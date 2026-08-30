@@ -95,15 +95,52 @@ def _current_time_line(utc_offset_minutes: int | None) -> str:
     )
 
 
-def build_system_prompt(language: str, memory_block: str, utc_offset_minutes: int | None = None) -> str:
+def _location_block(current_user: dict) -> str:
     """
-    Structure: PERSONALITY → MEMORY → TIME → LANGUAGE RULE → HARD RULES
+    Lets Ollie sound like a local -- culture, food, sports, slang,
+    holidays, current local context -- instead of defaulting to
+    generic/US-centric references. Entirely opt-in: current_user is
+    already the full row (get_current_user selects "*"), so reading
+    country/region/district here is free, no extra query -- and
+    empty for anyone who's never set these in Settings, same as
+    memory context being empty for a brand-new user.
+    """
+    place = ", ".join(
+        p.strip() for p in (
+            current_user.get("district"),
+            current_user.get("region"),
+            current_user.get("country"),
+        ) if p and p.strip()
+    )
+    if not place:
+        return ""
+    return (
+        f"\nUSER'S LOCATION: {place}. Use this to sound like a local "
+        "when it's natural -- local culture, food, sports, slang, "
+        "holidays, weather, current local context. Never announce "
+        "that you know their location or make it feel like "
+        "surveillance -- just BE from-here in how you talk, the same "
+        "way memory should feel natural, never creepy."
+    )
+
+
+def build_system_prompt(
+    language: str,
+    memory_block: str,
+    utc_offset_minutes: int | None = None,
+    location_block: str = "",
+) -> str:
+    """
+    Structure: PERSONALITY → MEMORY → LOCATION → TIME → LANGUAGE RULE → HARD RULES
     Memory injected before rules are finalized.
     """
     parts = [OLLIE_PERSONALITY]
 
     if memory_block:
         parts.append(f"\n{memory_block}")
+
+    if location_block:
+        parts.append(location_block)
 
     parts.append(f"\n{_current_time_line(utc_offset_minutes)}")
 
@@ -136,6 +173,7 @@ def get_ollie_response(
     model: str,
     utc_offset_minutes: int | None = None,
     max_retries: int = 2,
+    location_block: str = "",
 ) -> str:
     """
     Calls the model to get Ollie's reply. Retries on transient
@@ -144,7 +182,7 @@ def get_ollie_response(
     logged with which model and attempt number, so real outages
     are visible instead of silently producing generic replies.
     """
-    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes)
+    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes, location_block)
 
     messages = [{"role": "system", "content": system_prompt}]
     messages += server_history
@@ -245,7 +283,7 @@ def _flag_moderation(user_id: str, direction: str, text: str, categories: list) 
 # gating) before calling this.
 # ============================================================
 
-def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None) -> dict:
+def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None, current_user: dict) -> dict:
     session_id = db.get_or_create_session(user_id)
     db.remember_utc_offset(user_id, utc_offset_minutes)
 
@@ -283,7 +321,11 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     db.save_message(user_id, session_id, message, "user")
 
     # Get response
-    reply = get_ollie_response(message, language, server_history, prompt_context, model, utc_offset_minutes)
+    location_block = _location_block(current_user)
+    reply = get_ollie_response(
+        message, language, server_history, prompt_context, model, utc_offset_minutes,
+        location_block=location_block,
+    )
 
     output_moderation = moderate_text(reply)
     if output_moderation:
@@ -368,7 +410,7 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
-        return _process_chat_message(db, user_id, req.message, req.utc_offset_minutes)
+        return _process_chat_message(db, user_id, req.message, req.utc_offset_minutes, current_user)
     except HTTPException:
         raise
     except Exception as e:
@@ -438,7 +480,7 @@ async def chat_voice(
     db.increment_message_count(user_id)
 
     try:
-        result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes)
+        result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes, current_user)
     except HTTPException:
         raise
     except Exception as e:
@@ -538,6 +580,7 @@ def _process_image_message(
     content_type: str,
     caption: str | None,
     utc_offset_minutes: int | None,
+    current_user: dict,
 ) -> dict:
     session_id = db.get_or_create_session(user_id)
     db.remember_utc_offset(user_id, utc_offset_minutes)
@@ -551,7 +594,8 @@ def _process_image_message(
     raw_history = db.get_recent_messages(user_id, limit=12)
     server_history = clean_history(raw_history)
 
-    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes) + IMAGE_REACTION_INSTRUCTIONS
+    location_block = _location_block(current_user)
+    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes, location_block) + IMAGE_REACTION_INSTRUCTIONS
 
     # The image itself is never stored -- only a text placeholder,
     # same principle as /chat/voice only keeping the transcript,
@@ -605,7 +649,7 @@ async def chat_image(
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
-        return _process_image_message(db, user_id, image_bytes, content_type, caption, utc_offset_minutes)
+        return _process_image_message(db, user_id, image_bytes, content_type, caption, utc_offset_minutes, current_user)
     except HTTPException:
         raise
     except Exception as e:

@@ -18,6 +18,12 @@ class NotificationToggleRequest(BaseModel):
     enabled: bool
 
 
+class LocationUpdateRequest(BaseModel):
+    country: str | None = None
+    region: str | None = None
+    district: str | None = None
+
+
 # ============================================================
 # USAGE — how many free messages used today, plan status
 # ============================================================
@@ -52,6 +58,9 @@ def get_usage(current_user: dict = Depends(get_current_user)):
             # current_user is the full row (get_current_user selects
             # "*"), so this is free, no extra query.
             "notifications_enabled": current_user.get("notifications_enabled") is not False,
+            "country": current_user.get("country"),
+            "region": current_user.get("region"),
+            "district": current_user.get("district"),
         }
     except Exception as e:
         logger.error(f"get_usage failed for user {current_user.get('id')}: {e}")
@@ -75,6 +84,33 @@ def toggle_notifications(
     except Exception as e:
         logger.error(f"toggle_notifications failed for user {current_user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail="Could not update notification setting")
+
+
+# ============================================================
+# LOCATION — country/region/district, so Ollie can talk like a
+# local. Entirely optional; see chat.py's _location_block.
+# ============================================================
+
+@router.put("/location")
+def update_location(
+    req: LocationUpdateRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    try:
+        supabase.table("users").update({
+            "country": req.country,
+            "region": req.region,
+            "district": req.district,
+        }).eq("id", current_user["id"]).execute()
+        return {
+            "success": True,
+            "country": req.country,
+            "region": req.region,
+            "district": req.district,
+        }
+    except Exception as e:
+        logger.error(f"update_location failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not update location")
 
 
 # ============================================================
