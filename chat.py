@@ -45,17 +45,49 @@ def get_history(current_user: dict = Depends(get_current_user)):
     """
     Returns this user's past messages so the chat screen can
     reload them on open, instead of starting empty every time.
+    Each message carries its id (needed client-side to reply to it
+    or scroll to it from search) and, when it's itself a reply, a
+    resolved reply_to preview -- resolved here rather than making
+    the client cross-reference ids so a reply to something outside
+    this page's own 50-message window still renders correctly.
     """
     db = OllieDB()
     history = db.get_conversation_history(current_user["id"], limit=50)
+
+    reply_ids = [msg["reply_to_id"] for msg in history if msg.get("reply_to_id")]
+    reply_lookup = db.get_messages_by_ids(reply_ids)
+
+    messages = []
+    for msg in history:
+        entry = {
+            "id": msg["id"],
+            "sender": msg["sender"],
+            "message": msg["message"],
+            "created_at": msg["created_at"],
+        }
+        reply_to = reply_lookup.get(msg.get("reply_to_id"))
+        if reply_to:
+            entry["reply_to"] = {"sender": reply_to["sender"], "message": reply_to["message"]}
+        messages.append(entry)
+    return {"messages": messages}
+
+
+@router.get("/chat/search")
+def search_chat(q: str, current_user: dict = Depends(get_current_user)):
+    """
+    Searches this user's full message history -- not just the last
+    50 loaded into the chat screen, see get_conversation_history.
+    """
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query cannot be empty")
+
+    db = OllieDB()
+    results = db.search_messages(current_user["id"], query, limit=50)
     return {
-        "messages": [
-            {
-                "sender": msg["sender"],
-                "message": msg["message"],
-                "created_at": msg["created_at"],
-            }
-            for msg in history
+        "results": [
+            {"id": r["id"], "sender": r["sender"], "message": r["message"], "created_at": r["created_at"]}
+            for r in results
         ]
     }
 
@@ -68,6 +100,7 @@ class ChatRequest(BaseModel):
     history: List[dict] = []
     utc_offset_minutes: int | None = None
     mode: str | None = None
+    reply_to_id: str | None = None
 
 class SpeakRequest(BaseModel):
     message: str
@@ -312,7 +345,7 @@ def _flag_moderation(user_id: str, direction: str, text: str, categories: list) 
 # gating) before calling this.
 # ============================================================
 
-def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None, current_user: dict, mode: str | None = None) -> dict:
+def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None, current_user: dict, mode: str | None = None, reply_to_id: str | None = None) -> dict:
     session_id = db.get_or_create_session(user_id)
     db.remember_utc_offset(user_id, utc_offset_minutes)
 
@@ -358,7 +391,7 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     prompt_context = f"{memory_block}\n{interest_block}" if interest_block else memory_block
 
     # Save user message
-    db.save_message(user_id, session_id, message, "user")
+    user_message_id = db.save_message(user_id, session_id, message, "user", reply_to_id=reply_to_id)
 
     # Get response
     location_block = _location_block(current_user)
@@ -382,7 +415,7 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
         )
 
     # Save Ollie reply
-    db.save_message(user_id, session_id, reply, "ollie", 0.0)
+    ollie_message_id = db.save_message(user_id, session_id, reply, "ollie", 0.0)
 
     # Save memory with category + importance scoring. The extraction
     # call itself always runs, even with memory disabled, since
@@ -447,7 +480,14 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     # so this is safe to call on every message.
     streak = db.update_streak(user_id, utc_offset_minutes)
 
-    return {"reply": reply, "language": language, "model_used": model, "streak": streak}
+    return {
+        "reply": reply,
+        "language": language,
+        "model_used": model,
+        "streak": streak,
+        "message_id": ollie_message_id,
+        "user_message_id": user_message_id,
+    }
 
 # ============================================================
 # CHAT ROUTE
@@ -476,7 +516,10 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
-        return _process_chat_message(db, user_id, req.message, req.utc_offset_minutes, current_user, mode=req.mode)
+        return _process_chat_message(
+            db, user_id, req.message, req.utc_offset_minutes, current_user,
+            mode=req.mode, reply_to_id=req.reply_to_id,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -804,7 +847,7 @@ def _process_image_message(
     # same principle as /chat/voice only keeping the transcript,
     # not the audio. Ollie's reply is what actually needs to persist.
     user_display_text = f"[shared a photo] {caption.strip()}" if caption and caption.strip() else "[shared a photo]"
-    db.save_message(user_id, session_id, user_display_text, "user")
+    user_message_id = db.save_message(user_id, session_id, user_display_text, "user")
 
     reply = _get_image_reaction(image_bytes, content_type, caption, system_prompt, server_history)
 
@@ -812,11 +855,16 @@ def _process_image_message(
     if output_moderation:
         _flag_moderation(user_id, "output", reply, output_moderation["categories"])
 
-    db.save_message(user_id, session_id, reply, "ollie", 0.0)
+    ollie_message_id = db.save_message(user_id, session_id, reply, "ollie", 0.0)
 
     streak = db.update_streak(user_id, utc_offset_minutes)
 
-    return {"reply": reply, "streak": streak}
+    return {
+        "reply": reply,
+        "streak": streak,
+        "message_id": ollie_message_id,
+        "user_message_id": user_message_id,
+    }
 
 
 @router.post("/chat/image")

@@ -191,13 +191,14 @@ class OllieDB:
             .execute()
         return (result.data or {}).get("current_streak") or 0
 
-    def save_message(self, user_id: str, session_id: str, message: str, sender: str, emotion_score: float = None):
-        self.supabase.table("conversations").insert({
+    def save_message(self, user_id: str, session_id: str, message: str, sender: str, emotion_score: float = None, reply_to_id: str = None):
+        result = self.supabase.table("conversations").insert({
             "user_id": user_id,
             "session_id": session_id,
             "message": message,
             "sender": sender,
             "emotion_score": emotion_score,
+            "reply_to_id": reply_to_id,
             "created_at": datetime.now(timezone.utc).isoformat()
         }).execute()
         if sender == "user":
@@ -207,6 +208,7 @@ class OllieDB:
             self.supabase.table("users").update({
                 "last_message_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", user_id).execute()
+        return result.data[0]["id"] if result.data else None
 
     def get_conversation_history(self, user_id: str, limit: int = 50):
         """
@@ -236,6 +238,33 @@ class OllieDB:
             role = "assistant" if msg["sender"] == "ollie" else "user"
             history.append({"role": role, "content": msg["message"]})
         return history
+
+    def search_messages(self, user_id: str, query: str, limit: int = 50):
+        """
+        Full history search, not limited to whatever's currently
+        loaded in the chat UI (get_conversation_history caps at the
+        last 50) -- ILIKE is fine at this scale, no need for a
+        dedicated search index.
+        """
+        response = self.supabase.table("conversations") \
+            .select("id, sender, message, created_at") \
+            .eq("user_id", user_id) \
+            .ilike("message", f"%{query}%") \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        return response.data
+
+    def get_messages_by_ids(self, ids: list[str]) -> dict:
+        """Batch lookup used to resolve reply-preview snippets in one
+        query instead of one per replied-to message."""
+        if not ids:
+            return {}
+        response = self.supabase.table("conversations") \
+            .select("id, sender, message") \
+            .in_("id", ids) \
+            .execute()
+        return {row["id"]: row for row in response.data}
 
     def save_memory(self, user_id: str, memory_text: str, importance: int = 1, category: str | None = None):
         # Check for duplicate before saving
