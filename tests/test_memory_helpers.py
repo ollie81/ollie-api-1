@@ -1,10 +1,12 @@
 # ============================================================
 # Tests for the pure (no network call) helpers in memory.py.
+# extract_memory_worthy and detect_goal_completion are LLM-based
+# now -- see test_extract_memory_worthy.py and
+# test_detect_goal_completion.py for those.
 # ============================================================
 
 from memory import (
     clean_history,
-    extract_memory_worthy,
     is_high_emotional_intensity,
     build_memory_context,
     pick_chat_model,
@@ -52,45 +54,6 @@ def test_clean_history_caps_at_ten_keeping_the_most_recent():
 
 def test_clean_history_handles_none_input():
     assert clean_history(None) == []
-
-
-# ---- extract_memory_worthy ----
-
-def test_extract_memory_worthy_identity_trigger():
-    text, importance = extract_memory_worthy("my name is Alex")
-    assert text is not None
-    assert importance == 3
-
-
-def test_extract_memory_worthy_preference_trigger():
-    text, importance = extract_memory_worthy("i love hiking on weekends")
-    assert text is not None
-    assert importance == 2
-
-
-def test_extract_memory_worthy_situational_trigger():
-    text, importance = extract_memory_worthy("my boss is being difficult")
-    assert text is not None
-    assert importance == 1
-
-
-def test_extract_memory_worthy_no_trigger():
-    assert extract_memory_worthy("what's up") == (None, 0)
-
-
-def test_extract_memory_worthy_too_short():
-    assert extract_memory_worthy("hi") == (None, 0)
-
-
-def test_extract_memory_worthy_empty():
-    assert extract_memory_worthy("") == (None, 0)
-    assert extract_memory_worthy(None) == (None, 0)
-
-
-def test_extract_memory_worthy_truncates_to_200_chars():
-    long_text = "my name is " + "a" * 300
-    text, _ = extract_memory_worthy(long_text)
-    assert len(text) == 200
 
 
 # ---- is_high_emotional_intensity ----
@@ -179,3 +142,15 @@ def test_build_memory_context_caps_at_top_ten_by_importance():
     result = build_memory_context(memories, {})
     assert "fact 14" in result  # importance 14, kept
     assert "fact 0" not in result  # importance 0, cut
+
+
+def test_build_memory_context_shows_category_when_present():
+    memories = [{"memory_text": "stuck on a login bug", "importance": 2, "category": "struggle"}]
+    result = build_memory_context(memories, {})
+    assert "[struggle] stuck on a login bug" in result
+
+
+def test_build_memory_context_omits_bracket_when_category_missing():
+    memories = [{"memory_text": "loves hiking", "importance": 2}]
+    result = build_memory_context(memories, {})
+    assert "[" not in result

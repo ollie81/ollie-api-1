@@ -257,8 +257,10 @@ def build_memory_context(memories: list, context: dict) -> str:
             if not isinstance(m, dict):
                 continue
             text = (m.get("memory_text") or "").strip()
-            if text:
-                memory_lines.append(f"  - {text}")
+            if not text:
+                continue
+            category = (m.get("category") or "").strip()
+            memory_lines.append(f"  - [{category}] {text}" if category else f"  - {text}")
         if memory_lines:
             parts.append("USER MEMORY:")
             parts.extend(memory_lines)
@@ -328,61 +330,160 @@ def clean_history(raw_history: list) -> list:
     return cleaned[-10:]
 
 # ============================================================
-# MEMORY EXTRACTION — Improved scoring
+# MEMORY EXTRACTION — judgment-based, categorized
 # ============================================================
+# Replaces the old keyword-trigger version (matching phrases like
+# "i love" or "my exam") with an actual judgment call about what a
+# close friend would bother remembering -- including things with no
+# fixed phrasing at all, like "I finally got the login working".
+#
+# Goals are deliberately NOT a category here -- they already have
+# their own lifecycle in the `goals` table (see extract_goal /
+# detect_goal_completion below). Recurring interests/hobbies are
+# also excluded -- see interest_memory.py, a separate system with
+# its own mention-count tracking. This only covers durable personal
+# facts: identity, preferences, accomplishments, struggles,
+# important people/pets, meaningful events, and promises/plans.
 
-# High importance triggers — identity level
-IDENTITY_TRIGGERS = [
-    "my name is", "call me", "i am", "i'm from",
-    "i live in", "i work at", "my job is", "i study",
-    "my birthday is", "i was born"
+MEMORY_CATEGORIES = [
+    "identity", "preference", "accomplishment", "struggle", "person", "event", "promise",
 ]
 
-# Medium importance triggers — preferences and emotions
-PREFERENCE_TRIGGERS = [
-    "i love", "i hate", "i fear", "i enjoy", "i prefer",
-    "my favorite", "i always", "i never", "i believe",
-    "my dream", "my goal", "i want to", "i'm scared of"
-]
 
-# Low importance triggers — situational
-SITUATIONAL_TRIGGERS = [
-    "my boss", "my mom", "my dad", "my friend", "my sister",
-    "my brother", "my exam", "my problem", "my school",
-    "my family", "i'm struggling", "i'm trying"
-]
-
-def extract_memory_worthy(text: str) -> tuple[str | None, int]:
+def extract_memory_worthy(text: str) -> tuple[str | None, str | None, int]:
     """
-    Returns (memory_text, importance) or (None, 0).
-    Importance: 3 = identity, 2 = preference, 1 = situational
+    Returns (memory_text, category, importance) or (None, None, 0).
+    memory_text is a short, clean, rewritten line -- not a raw slice
+    of the message -- so it reads naturally when surfaced back in a
+    future conversation. Importance: 3 = major/identity, 2 =
+    notable, 1 = minor. Never raises -- a failed extraction just
+    means nothing is saved this turn.
     """
+    if not text or not text.strip() or len(text.strip()) < 5:
+        return None, None, 0
+
     try:
-        if not text:
-            return None, 0
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You're deciding what a genuinely close friend would "
+                        "bother remembering from this message -- not every "
+                        "detail, only things worth bringing up again later: "
+                        "who they are (name, background, where they live/work/"
+                        "study), a real preference or favorite, something they "
+                        "accomplished, something they're struggling with, an "
+                        "important person or pet, a meaningful event, or a "
+                        "promise/plan they made. Ignore small talk, questions, "
+                        "and anything forgettable.\n\n"
+                        "If it's worth remembering, rewrite it as a short, "
+                        "clean third-person memory line, not a copy of their "
+                        "exact words -- e.g. \"Stuck on a login bug for their "
+                        "app\" or \"Got the login bug working after weeks "
+                        "stuck on it\" or \"Has a dog named Max\".\n\n"
+                        "Reply with ONLY a JSON object, no other text:\n"
+                        '{"worth_remembering": true or false, '
+                        '"memory": "short clean memory line, or empty string", '
+                        f'"category": "one of {MEMORY_CATEGORIES}, or empty string", '
+                        '"importance": 1, 2, or 3}'
+                    )
+                },
+                {"role": "user", "content": text}
+            ],
+            max_completion_tokens=120,
+            temperature=0,
+            timeout=10,
+        )
 
-        text_lower = text.lower().strip()
+        content = response.choices[0].message.content
+        if not content:
+            return None, None, 0
 
-        if not text_lower or len(text_lower) < 5:
-            return None, 0
+        data = json.loads(content.strip())
 
-        for trigger in IDENTITY_TRIGGERS:
-            if trigger in text_lower:
-                return text[:200], 3
+        if not data.get("worth_remembering"):
+            return None, None, 0
 
-        for trigger in PREFERENCE_TRIGGERS:
-            if trigger in text_lower:
-                return text[:200], 2
+        memory_text = (data.get("memory") or "").strip()
+        category = (data.get("category") or "").strip().lower()
+        importance = data.get("importance")
 
-        for trigger in SITUATIONAL_TRIGGERS:
-            if trigger in text_lower:
-                return text[:200], 1
+        if not memory_text or len(memory_text) > 200:
+            return None, None, 0
+        if category not in MEMORY_CATEGORIES:
+            category = None
+        if importance not in (1, 2, 3):
+            importance = 1
 
-        return None, 0
+        return memory_text, category, importance
 
     except Exception as e:
         logger.warning(f"extract_memory_worthy failed, skipping: {e}")
-        return None, 0
+        return None, None, 0
+
+
+# ============================================================
+# GOAL COMPLETION DETECTION
+# ============================================================
+# The connective tissue behind "you finally got that login working"
+# -- separate from extract_goal (which only ever creates a goal),
+# this checks whether a message indicates one of the person's
+# EXISTING active goals was just finished, so it can be closed out
+# and logged as an accomplishment rather than lingering forever as
+# "still working on it".
+
+def detect_goal_completion(active_goals: list[str], text: str) -> str | None:
+    """
+    Returns the exact matching title of an active goal this message
+    indicates was just completed, or None. Strict by design -- only
+    a clear completion matches, not general progress or a passing
+    mention. Never raises.
+    """
+    if not text or not text.strip() or not active_goals:
+        return None
+
+    try:
+        goals_list = "\n".join(f"- {g}" for g in active_goals)
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Here are the person's current active goals:\n"
+                        f"{goals_list}\n\n"
+                        "Decide if their message CLEARLY indicates one of "
+                        "these exact goals was just finished/accomplished "
+                        "right now -- not general progress, not a passing "
+                        "mention, a real completion.\n\n"
+                        "Reply with ONLY a JSON object, no other text:\n"
+                        '{"completed": true or false, "goal": "exact '
+                        'matching title from the list above, or empty string"}'
+                    )
+                },
+                {"role": "user", "content": text}
+            ],
+            max_completion_tokens=60,
+            temperature=0,
+            timeout=10,
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            return None
+
+        data = json.loads(content.strip())
+        if not data.get("completed"):
+            return None
+
+        goal = (data.get("goal") or "").strip()
+        return goal if goal in active_goals else None
+
+    except Exception as e:
+        logger.warning(f"detect_goal_completion failed, skipping: {e}")
+        return None
 
 # ============================================================
 # MOOD DETECTION
