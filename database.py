@@ -127,6 +127,13 @@ class OllieDB:
         calendar day, resets it to 1 if a day was missed, and
         leaves it alone if they've already been credited today.
 
+        Also bumps total_active_days in the same step -- a lifetime
+        count of distinct days talked to Ollie that, unlike the
+        streak, never resets on a missed day. This is the "duration"
+        half of the relationship-stage signal (see relationship.py) —
+        deliberately not the streak itself, since a missed day
+        should never set the relationship back.
+
         Uses the user's LOCAL date (from utc_offset_minutes), not
         the server's — a streak that rolls over at UTC midnight
         would feel wrong for anyone outside UTC. Falls back to UTC
@@ -136,7 +143,7 @@ class OllieDB:
         today_local = (datetime.now(timezone.utc) + offset).date()
 
         result = self.supabase.table("users") \
-            .select("current_streak, last_streak_date") \
+            .select("current_streak, last_streak_date, total_active_days") \
             .eq("id", user_id) \
             .single() \
             .execute()
@@ -149,10 +156,12 @@ class OllieDB:
             return current_streak
 
         new_streak = current_streak + 1 if last_date == today_local - timedelta(days=1) else 1
+        total_active_days = (row.get("total_active_days") or 0) + 1
 
         self.supabase.table("users").update({
             "current_streak": new_streak,
             "last_streak_date": today_local.isoformat(),
+            "total_active_days": total_active_days,
         }).eq("id", user_id).execute()
 
         return new_streak
@@ -350,6 +359,53 @@ class OllieDB:
             "memories": memories,
             "today_mood": mood.data[0] if mood.data else None,
             "active_goals": goals.data if goals.data else []
+        }
+
+    def get_journey_summary(self, user_id: str) -> dict:
+        """
+        Everything the "Our Space" screen needs in one call: how
+        many memories Ollie has (a count query, not a full fetch --
+        the screen doesn't need the rows, just the number), goals
+        (active + completed, for "goals they've worked on"), and a
+        curated slice of memories worth looking back on -- the
+        more moment-like categories, not plain identity/preference
+        facts that are more reference data than "a moment in our
+        story" (those stay visible via the full Manage Memories
+        list instead).
+        """
+        memory_count_result = self.supabase.table("memories") \
+            .select("id", count="exact") \
+            .eq("user_id", user_id) \
+            .eq("is_active", True) \
+            .execute()
+        memory_count = memory_count_result.count or 0
+
+        goals_result = self.supabase.table("goals") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .in_("status", ["active", "completed"]) \
+            .order("completed_at", desc=True) \
+            .execute()
+        goals = goals_result.data or []
+        active_goals = [g for g in goals if g.get("status") == "active"]
+        completed_goals = [g for g in goals if g.get("status") == "completed"]
+
+        highlights_result = self.supabase.table("memories") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .eq("is_active", True) \
+            .in_("category", ["accomplishment", "struggle", "person", "event", "promise"]) \
+            .order("importance", desc=True) \
+            .order("created_at", desc=True) \
+            .limit(30) \
+            .execute()
+        highlights = highlights_result.data or []
+
+        return {
+            "memory_count": memory_count,
+            "active_goals": active_goals,
+            "completed_goals": completed_goals,
+            "highlights": highlights,
         }
 
     def check_voice_minutes(self, user_id: str):
