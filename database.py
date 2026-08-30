@@ -200,6 +200,13 @@ class OllieDB:
             "emotion_score": emotion_score,
             "created_at": datetime.now(timezone.utc).isoformat()
         }).execute()
+        if sender == "user":
+            # Backs the "you disappeared" re-engagement check (see
+            # daily_message.py) -- only user messages count as
+            # activity, Ollie's own replies obviously don't.
+            self.supabase.table("users").update({
+                "last_message_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", user_id).execute()
 
     def get_conversation_history(self, user_id: str, limit: int = 50):
         """

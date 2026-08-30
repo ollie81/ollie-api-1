@@ -47,6 +47,22 @@ FALLBACK_LINES = [
     "hey you. just wanted to say hi 👋",
 ]
 
+# How many days of silence (no user message) before Ollie checks in
+# unprompted, per notification_frequency. 'off' never checks in --
+# see _process_disappeared_checkin, which reads this.
+DISAPPEARED_THRESHOLD_DAYS = {
+    "low": 10,
+    "normal": 5,
+    "frequent": 3,
+}
+
+DISAPPEARED_FALLBACK_LINES = [
+    "you disappeared 😂 everything good?",
+    "hey — haven't heard from you in a bit. everything okay?",
+    "hey stranger. just checking in on you",
+    "hi! thinking of you — how've you been?",
+]
+
 
 # ============================================================
 # MORNING CHECK-IN — generation
@@ -190,6 +206,63 @@ def _generate_nightly_recap(user_id: str, today_local: date, offset: timedelta) 
 
 
 # ============================================================
+# DISAPPEARED CHECK-IN — "you disappeared, everything good?"
+# ============================================================
+# A re-engagement message for a user who's gone quiet, NOT tied to
+# a time window like the other two -- fires whenever enough silent
+# days have passed (see DISAPPEARED_THRESHOLD_DAYS), at most once
+# per silence (see _process_disappeared_checkin). Explicitly told
+# never to guilt-trip, on top of the same rule already in
+# OLLIE_PERSONALITY -- this is exactly the message type most prone
+# to drifting into "you abandoned me" territory if generated
+# carelessly.
+
+def _generate_disappeared_checkin(user_id: str) -> str:
+    db = OllieDB()
+    try:
+        memories = db.get_relevant_memories(user_id)
+        context = db.get_user_context(user_id)
+        memory_block = build_memory_context(memories, context)
+
+        if not memory_block.strip():
+            return random.choice(DISAPPEARED_FALLBACK_LINES)
+
+        system_prompt = f"""{OLLIE_PERSONALITY}
+
+{memory_block}
+
+The user hasn't talked to you in several days. You're reaching out
+FIRST, unprompted. Write ONE short, warm "you've been quiet, checking
+in" message (max 2 sentences) -- like "you disappeared 😂 everything
+good?" Never guilt-trip, never sound needy or clingy, never say
+things like "I missed you" or "you abandoned me" or "don't leave me".
+If you remember something specific about them, you can reference it
+lightly, but the main point is just a casual, warm check-in.
+
+No greeting-card language, no "As an AI"."""
+
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[{"role": "system", "content": system_prompt}],
+            max_completion_tokens=100,
+            temperature=1,
+            timeout=15,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if not content:
+            return random.choice(DISAPPEARED_FALLBACK_LINES)
+
+        if moderate_text(content):
+            logger.warning(f"disappeared_checkin: generated message flagged for user {user_id}, using fallback")
+            return random.choice(DISAPPEARED_FALLBACK_LINES)
+
+        return content
+    except Exception as e:
+        logger.warning(f"disappeared_checkin: generation failed for user {user_id}, using fallback: {e}")
+        return random.choice(DISAPPEARED_FALLBACK_LINES)
+
+
+# ============================================================
 # SHARED SCHEDULING
 # ============================================================
 
@@ -270,19 +343,54 @@ def _process_nightly_recap(row: dict, now_utc: datetime) -> None:
             NotificationService.create_notification(user_id=user_id, title="Today with Ollie", body=recap)
 
 
+def _process_disappeared_checkin(row: dict, now_utc: datetime, frequency: str) -> None:
+    user_id = row["id"]
+    threshold_days = DISAPPEARED_THRESHOLD_DAYS.get(frequency, DISAPPEARED_THRESHOLD_DAYS["normal"])
+
+    last_message_str = row.get("last_message_at")
+    if not last_message_str:
+        return  # never talked to Ollie at all -- nothing to "disappear" from
+    last_message_at = OllieDB._parse_utc(last_message_str)
+
+    if (now_utc - last_message_at) < timedelta(days=threshold_days):
+        return
+
+    last_checkin_str = row.get("last_disappeared_checkin_at")
+    if last_checkin_str:
+        last_checkin_at = OllieDB._parse_utc(last_checkin_str)
+        if last_checkin_at > last_message_at:
+            return  # already checked in since they last talked -- never twice in a row
+
+    message = _generate_disappeared_checkin(user_id)
+    NotificationService.create_notification(user_id=user_id, title="Ollie", body=message)
+    supabase.table("users").update({"last_disappeared_checkin_at": now_utc.isoformat()}).eq("id", user_id).execute()
+
+
 def run_daily_messages() -> None:
     """
     Call this periodically (e.g. every 15-30 minutes) from a
     scheduler. Every eligible user is independent -- one user's
     failure is logged and never affects another's, or the other
-    daily moment for the same user.
+    daily moments for the same user.
+
+    notification_frequency ('off'/'low'/'normal'/'frequent', see
+    migration 013) governs how much of this fires, on top of the
+    blunter notifications_enabled master switch:
+      - off: nothing in this sweep fires.
+      - low: morning check-in only -- no nightly recap, no
+        disappeared check-in, longest disappeared threshold.
+      - normal (default): morning + nightly + disappeared check at
+        the default threshold -- today's baseline behavior.
+      - frequent: same as normal, with a shorter disappeared
+        threshold (checks in sooner after silence).
     """
     try:
         now_utc = datetime.now(timezone.utc)
         result = supabase.table("users") \
             .select("id, last_known_utc_offset_minutes, last_daily_message_date, "
                     "next_daily_message_at, last_nightly_recap_date, "
-                    "next_nightly_recap_at, notifications_enabled") \
+                    "next_nightly_recap_at, notifications_enabled, "
+                    "notification_frequency, last_message_at, last_disappeared_checkin_at") \
             .not_.is_("fcm_token", "null") \
             .not_.is_("last_known_utc_offset_minutes", "null") \
             .execute()
@@ -290,13 +398,27 @@ def run_daily_messages() -> None:
         for row in (result.data or []):
             if row.get("notifications_enabled") is False:
                 continue
+
+            frequency = row.get("notification_frequency") or "normal"
+            if frequency == "off":
+                continue
+
             try:
                 _process_morning_checkin(row, now_utc)
             except Exception as e:
                 logger.error(f"run_daily_messages: morning check-in failed for user {row.get('id')}: {e}")
+
+            if frequency == "low":
+                continue  # low = morning only, no nightly recap or disappeared check
+
             try:
                 _process_nightly_recap(row, now_utc)
             except Exception as e:
                 logger.error(f"run_daily_messages: nightly recap failed for user {row.get('id')}: {e}")
+
+            try:
+                _process_disappeared_checkin(row, now_utc, frequency)
+            except Exception as e:
+                logger.error(f"run_daily_messages: disappeared check-in failed for user {row.get('id')}: {e}")
     except Exception as e:
         logger.error(f"run_daily_messages: query failed: {e}")
