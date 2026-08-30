@@ -3,6 +3,7 @@
 # ============================================================
 
 import logging
+from datetime import datetime, timezone
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -279,6 +280,26 @@ def clear_memory(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"clear_memory failed for user {current_user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail="Could not clear memory")
+
+
+# ============================================================
+# EXPORT DATA — everything meaningful this account holds, as one
+# JSON payload. See OllieDB.export_user_data for exactly what is
+# and isn't included (no security/internal fields).
+# ============================================================
+
+@router.get("/export-data")
+def export_data(current_user: dict = Depends(get_current_user)):
+    try:
+        db = OllieDB()
+        data = db.export_user_data(current_user["id"])
+        return {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            **data,
+        }
+    except Exception as e:
+        logger.error(f"export_data failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not export your data")
 
 
 # ============================================================

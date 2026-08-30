@@ -801,6 +801,41 @@ class OllieDB:
 
         self.supabase.table("users").delete().eq("id", user_id).execute()
 
+    def export_user_data(self, user_id: str) -> dict:
+        """
+        Everything meaningful this account holds -- content and
+        preferences, the "download your data" counterpart to
+        delete_account above. Deliberately excludes: password_hash /
+        email_otp_hash / email_otp_expires_at (security material,
+        never meant to leave the server), refresh_tokens (session
+        credentials), crisis_flags/moderation_flags (internal trust
+        & safety logs, not user content), and sessions/message_usage/
+        voice_usage (internal bookkeeping, no real content of its
+        own). No .order() on any of these -- an export doesn't need
+        sorted rows, and ordering by a column this file never
+        actually confirmed exists on every one of these tables isn't
+        worth risking a failed export over.
+        """
+        user_row = self.supabase.table("users").select("*").eq("id", user_id).execute().data
+        profile = dict(user_row[0]) if user_row else {}
+        for field in ("password_hash", "email_otp_hash", "email_otp_expires_at", "deletion_requested_at", "fcm_token"):
+            profile.pop(field, None)
+
+        def _rows(table: str):
+            return self.supabase.table(table).select("*").eq("user_id", user_id).execute().data
+
+        return {
+            "profile": profile,
+            "conversations": _rows("conversations"),
+            "memories": self.supabase.table("memories").select("*").eq("user_id", user_id).eq("is_active", True).execute().data,
+            "goals": _rows("goals"),
+            "moods": _rows("moods"),
+            "interests": _rows("user_interests"),
+            "scheduled_events": _rows("scheduled_events"),
+            "subscriptions": _rows("subscriptions"),
+            "notifications": _rows("notifications"),
+        }
+
 
 def purge_expired_account_deletions() -> None:
     """
