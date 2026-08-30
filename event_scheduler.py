@@ -588,12 +588,30 @@ def _checkins_sent_today(user_id: str) -> int:
     return len(response.data) if response.data else 0
 
 
+def _proactive_notifications_off(user_id: str) -> bool:
+    """
+    Ollie-INITIATED proactive messages (event check-ins here, plus
+    the morning check-in / nightly recap / disappeared check in
+    daily_message.py) respect notification_frequency == 'off' --
+    separate from notifications_enabled, the blunt master push
+    switch that also covers reminders (explicit user requests,
+    which always send regardless of this setting). Fails open (does
+    NOT block) on a lookup error, so a DB hiccup never silently
+    swallows a check-in the cap/window logic already approved.
+    """
+    try:
+        result = supabase.table("users").select("notification_frequency").eq("id", user_id).single().execute()
+        return (result.data or {}).get("notification_frequency") == "off"
+    except Exception:
+        return False
+
+
 def run_due_notifications() -> None:
     """
     Call this periodically (e.g. every 10 minutes) from a
     scheduler. Finds due check-ins AND reminders. Reminders
     always send (they're explicit user requests); check-ins
-    still respect the daily cap.
+    still respect the daily cap and notification_frequency.
     """
     try:
         now = datetime.now(timezone.utc).isoformat()
@@ -612,6 +630,10 @@ def run_due_notifications() -> None:
             kind = row.get("kind", "checkin")
 
             try:
+                if kind == "checkin" and _proactive_notifications_off(user_id):
+                    supabase.table("scheduled_events").update({"status": "skipped"}).eq("id", row_id).execute()
+                    continue
+
                 if kind == "checkin" and _checkins_sent_today(user_id) >= MAX_CHECKINS_PER_USER_PER_DAY:
                     logger.info(f"run_due_notifications: daily cap hit for user {user_id}, deferring")
                     continue  # leave pending, retry next tick / next day

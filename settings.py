@@ -3,6 +3,7 @@
 # ============================================================
 
 import logging
+from typing import Literal
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
@@ -16,6 +17,10 @@ router = APIRouter()
 
 class NotificationToggleRequest(BaseModel):
     enabled: bool
+
+
+class NotificationFrequencyRequest(BaseModel):
+    frequency: Literal["off", "low", "normal", "frequent"]
 
 
 class LocationUpdateRequest(BaseModel):
@@ -67,6 +72,7 @@ def get_usage(current_user: dict = Depends(get_current_user)):
             # current_user is the full row (get_current_user selects
             # "*"), so this is free, no extra query.
             "notifications_enabled": current_user.get("notifications_enabled") is not False,
+            "notification_frequency": current_user.get("notification_frequency") or "normal",
             "memory_enabled": current_user.get("memory_enabled") is not False,
             "country": current_user.get("country"),
             "region": current_user.get("region"),
@@ -94,6 +100,31 @@ def toggle_notifications(
     except Exception as e:
         logger.error(f"toggle_notifications failed for user {current_user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail="Could not update notification setting")
+
+
+@router.put("/notification-frequency")
+def update_notification_frequency(
+    req: NotificationFrequencyRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Governs how much Ollie reaches out FIRST (morning check-in,
+    nightly recap, event check-ins, "you disappeared") -- see
+    daily_message.py / event_scheduler.py. Setting this to "off"
+    also flips the blunter notifications_enabled master switch off,
+    so a single control genuinely means no push at all, matching
+    what picking "Off" implies. Reminders (explicit user requests)
+    are a separate concern and always send regardless of this.
+    """
+    try:
+        supabase.table("users").update({
+            "notification_frequency": req.frequency,
+            "notifications_enabled": req.frequency != "off",
+        }).eq("id", current_user["id"]).execute()
+        return {"success": True, "notification_frequency": req.frequency}
+    except Exception as e:
+        logger.error(f"update_notification_frequency failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not update notification frequency")
 
 
 # ============================================================
