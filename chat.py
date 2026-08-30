@@ -76,6 +76,10 @@ class ModeStarterRequest(BaseModel):
     mode: str
     utc_offset_minutes: int | None = None
 
+class WelcomeRequest(BaseModel):
+    name: str
+    utc_offset_minutes: int | None = None
+
 # ============================================================
 # MEMORY RECALL DEPTH — how many memories Ollie draws on per
 # reply. Free tier keeps today's existing depth exactly (10 was
@@ -630,6 +634,69 @@ def chat_mode_starter(req: ModeStarterRequest, current_user: dict = Depends(get_
     except Exception as e:
         logger.error(f"chat_mode_starter failed for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Could not start that")
+
+# ============================================================
+# WELCOME — Ollie's very first message, right after onboarding.
+# Same shape as _generate_mode_opener above (system-only call, no
+# memory lookup since there's nothing to recall yet for a brand-new
+# user, doesn't touch the daily cap/streak). Caller (the onboarding
+# flow) controls exactly when this fires -- once, right after
+# signup -- so there's no server-side "first time only" guard here,
+# same as mode-starter.
+# ============================================================
+
+def _generate_welcome_message(name: str, current_user: dict, utc_offset_minutes: int | None) -> str:
+    fallback = f"hey {name}! so happy you're here 😊 what's on your mind today?"
+    try:
+        location_block = _location_block(current_user)
+        welcome_instructions = (
+            f"\nThis is the very FIRST message you've ever sent this person -- "
+            f"they just signed up. Their name is {name}. Greet them warmly and "
+            "personally, using their name naturally (not forced). Sound genuinely "
+            "excited to meet them, like a new friend would, not a feature tour or "
+            "a sales pitch -- don't list what you can do. Keep it short (2-3 "
+            "sentences), warm, a little playful. End with a light, easy question "
+            "that gets them talking."
+        )
+        system_prompt = build_system_prompt("english", "", utc_offset_minutes, location_block, welcome_instructions)
+
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[{"role": "system", "content": system_prompt}],
+            max_completion_tokens=120,
+            temperature=1,
+            timeout=15,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if not content:
+            return fallback
+
+        if moderate_text(content):
+            logger.warning("welcome_message: generated message flagged, using fallback")
+            return fallback
+
+        return content
+    except Exception as e:
+        logger.warning(f"welcome_message: generation failed, using fallback: {e}")
+        return fallback
+
+
+@router.post("/chat/welcome")
+def chat_welcome(req: WelcomeRequest, current_user: dict = Depends(get_current_user)):
+    db = OllieDB()
+    user_id = current_user["id"]
+    name = req.name.strip()[:50] or "there"
+
+    try:
+        session_id = db.get_or_create_session(user_id)
+        greeting = _generate_welcome_message(name, current_user, req.utc_offset_minutes)
+        db.save_message(user_id, session_id, greeting, "ollie", 0.0)
+        return {"reply": greeting}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"chat_welcome failed for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Could not generate welcome message")
 
 # ============================================================
 # IMAGE CHAT ROUTE — send a photo, get a real reaction to it.

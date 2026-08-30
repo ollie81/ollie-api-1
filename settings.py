@@ -39,6 +39,10 @@ class MemoryUpdateRequest(BaseModel):
     category: str | None = None
 
 
+class DisplayNameRequest(BaseModel):
+    name: str
+
+
 # ============================================================
 # USAGE — how many free messages used today, plan status
 # ============================================================
@@ -82,6 +86,28 @@ def get_usage(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"get_usage failed for user {current_user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail="Could not load usage")
+
+
+# ============================================================
+# DISPLAY NAME — what Ollie calls you. Stored in `username`, which
+# is purely a display field already -- auth only ever keys off id/
+# phone/email, never username -- so this is safe to let onboarding
+# set. Phone and email signups have no real name otherwise (their
+# username defaults to their raw phone number or email address);
+# Google signups already get this for free from their Google name.
+# ============================================================
+
+@router.put("/display-name")
+def update_display_name(req: DisplayNameRequest, current_user: dict = Depends(get_current_user)):
+    name = req.name.strip()[:50]
+    if not name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+    try:
+        supabase.table("users").update({"username": name}).eq("id", current_user["id"]).execute()
+        return {"success": True, "username": name}
+    except Exception as e:
+        logger.error(f"update_display_name failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not update name")
 
 
 # ============================================================

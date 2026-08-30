@@ -483,6 +483,7 @@ def google_login(req: GoogleAuthRequest, request: Request):
         name = info.get("name", email)
 
         existing = supabase.table("users").select("*").eq("phone", email).execute()
+        is_new_user = not existing.data
         if existing.data:
             user = existing.data[0]
         else:
@@ -508,7 +509,11 @@ def google_login(req: GoogleAuthRequest, request: Request):
             "success": True,
             "access_token": access_token,
             "refresh_token": refresh_token,
-            "token_type": "bearer"
+            "token_type": "bearer",
+            # Lets the client show onboarding only the very first
+            # time, not on every subsequent Google login.
+            "is_new_user": is_new_user,
+            "username": user.get("username"),
         }
     except Exception as e:
         logger.warning(f"google_login failed: {e}")
