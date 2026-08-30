@@ -24,6 +24,15 @@ class LocationUpdateRequest(BaseModel):
     district: str | None = None
 
 
+class MemoryToggleRequest(BaseModel):
+    enabled: bool
+
+
+class MemoryUpdateRequest(BaseModel):
+    memory_text: str | None = None
+    category: str | None = None
+
+
 # ============================================================
 # USAGE — how many free messages used today, plan status
 # ============================================================
@@ -58,6 +67,7 @@ def get_usage(current_user: dict = Depends(get_current_user)):
             # current_user is the full row (get_current_user selects
             # "*"), so this is free, no extra query.
             "notifications_enabled": current_user.get("notifications_enabled") is not False,
+            "memory_enabled": current_user.get("memory_enabled") is not False,
             "country": current_user.get("country"),
             "region": current_user.get("region"),
             "district": current_user.get("district"),
@@ -111,6 +121,72 @@ def update_location(
     except Exception as e:
         logger.error(f"update_location failed for user {current_user.get('id')}: {e}")
         raise HTTPException(status_code=500, detail="Could not update location")
+
+
+# ============================================================
+# MEMORIES — view, edit, delete individual memories; toggle
+# whether Ollie remembers/uses memory at all. See chat.py's
+# memory_enabled gate and memory.py's extract_memory_worthy.
+# ============================================================
+
+@router.get("/memories")
+def list_memories(current_user: dict = Depends(get_current_user)):
+    try:
+        db = OllieDB()
+        memories = db.get_all_memories(current_user["id"])
+        return {"memories": memories}
+    except Exception as e:
+        logger.error(f"list_memories failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not load memories")
+
+
+@router.patch("/memories/{memory_id}")
+def update_memory(
+    memory_id: str,
+    req: MemoryUpdateRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    try:
+        db = OllieDB()
+        updated = db.update_memory(
+            current_user["id"], memory_id,
+            memory_text=req.memory_text, category=req.category,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"update_memory failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not update memory")
+
+
+@router.delete("/memories/{memory_id}")
+def delete_single_memory(memory_id: str, current_user: dict = Depends(get_current_user)):
+    try:
+        db = OllieDB()
+        deleted = db.delete_memory(current_user["id"], memory_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"delete_single_memory failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not delete memory")
+
+
+@router.put("/memory/enabled")
+def toggle_memory(req: MemoryToggleRequest, current_user: dict = Depends(get_current_user)):
+    try:
+        supabase.table("users").update({
+            "memory_enabled": req.enabled
+        }).eq("id", current_user["id"]).execute()
+        return {"success": True, "memory_enabled": req.enabled}
+    except Exception as e:
+        logger.error(f"toggle_memory failed for user {current_user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail="Could not update memory setting")
 
 
 # ============================================================

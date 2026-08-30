@@ -21,6 +21,7 @@ from memory import (
     extract_memory_worthy,
     detect_mood,
     extract_goal,
+    detect_goal_completion,
     pick_chat_model,
     FAST_MODEL,
     FLAGSHIP_MODEL,
@@ -295,10 +296,18 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     if input_moderation:
         _flag_moderation(user_id, "input", message, input_moderation["categories"])
 
-    # Get memories + context
-    memories = db.get_relevant_memories(user_id)
-    context = db.get_user_context(user_id)
-    memory_block = build_memory_context(memories, context)
+    # Get memories + context — retrieval is skipped entirely when
+    # the user has turned memory off in Settings, so Ollie stops
+    # using previously stored memories immediately, not just stops
+    # adding new ones.
+    memory_enabled = current_user.get("memory_enabled") is not False
+    if memory_enabled:
+        memories = db.get_relevant_memories(user_id)
+        context = db.get_user_context(user_id)
+        memory_block = build_memory_context(memories, context)
+    else:
+        context = {}
+        memory_block = ""
 
     # Rebuild clean history server-side — fixes amnesia
     raw_history = db.get_recent_messages(user_id, limit=12)
@@ -314,7 +323,9 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     # Interest memory — separate, additive system. Added to the
     # PROMPT CONTEXT only, after routing is already decided, so
     # it enriches Ollie's replies without affecting cost/routing.
-    interest_block = build_interest_context(user_id)
+    # Also respects the memory toggle -- still "Ollie learning
+    # things about you" in spirit.
+    interest_block = build_interest_context(user_id) if memory_enabled else ""
     prompt_context = f"{memory_block}\n{interest_block}" if interest_block else memory_block
 
     # Save user message
@@ -343,22 +354,44 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     # Save Ollie reply
     db.save_message(user_id, session_id, reply, "ollie", 0.0)
 
-    # Save memory with importance scoring
-    memory_text, importance = extract_memory_worthy(message)
-    if memory_text:
-        db.save_memory(user_id, memory_text, importance=importance)
+    # Save memory with category + importance scoring. The extraction
+    # call itself always runs, even with memory disabled, since
+    # maybe_schedule_event below reuses its importance score for an
+    # unrelated purpose (deciding whether a mentioned future event
+    # deserves a check-in reminder) -- only the actual STORE is
+    # gated on memory_enabled, so disabling memory stops Ollie from
+    # remembering personal facts/goals/mood without silently
+    # breaking reminders.
+    memory_text, category, importance = extract_memory_worthy(message)
+    if memory_text and memory_enabled:
+        db.save_memory(user_id, memory_text, importance=importance, category=category)
 
-    # Update today's mood if this message clearly conveys one —
-    # feeds the "MOOD TODAY" block back into tomorrow's context.
-    mood = detect_mood(message)
-    if mood:
-        db.update_mood(user_id, mood)
+    if memory_enabled:
+        # Update today's mood if this message clearly conveys one —
+        # feeds the "MOOD TODAY" block back into tomorrow's context.
+        mood = detect_mood(message)
+        if mood:
+            db.update_mood(user_id, mood)
 
-    # Save a goal if one was clearly expressed — feeds the
-    # "ACTIVE GOALS" block back into future context.
-    goal = extract_goal(message)
-    if goal:
-        db.save_goal(user_id, goal)
+        # Save a goal if one was clearly expressed — feeds the
+        # "ACTIVE GOALS" block back into future context.
+        goal = extract_goal(message)
+        if goal:
+            db.save_goal(user_id, goal)
+
+        # Check if this message indicates an EXISTING active goal
+        # was just finished -- the connective tissue that lets Ollie
+        # notice "you finally got that login working" instead of
+        # just filing it as a new, unrelated memory. Closes the goal
+        # out and logs a clean accomplishment memory in one step.
+        active_goal_titles = [
+            g.get("title") for g in context.get("active_goals", [])
+            if isinstance(g, dict) and g.get("title")
+        ]
+        completed_goal = detect_goal_completion(active_goal_titles, message)
+        if completed_goal:
+            db.complete_goal(user_id, completed_goal)
+            db.save_memory(user_id, f"Accomplished: {completed_goal}", importance=3, category="accomplishment")
 
     # Check if this message describes a meaningful future event
     # (interview, exam, first date, deadline, family event —
@@ -374,8 +407,11 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     maybe_schedule_reminder(user_id, message, utc_offset_minutes)
 
     # Track ongoing interests/hobbies mentioned — separate,
-    # additive system. Failure here never breaks the reply.
-    maybe_track_interest(user_id, message)
+    # additive system. Failure here never breaks the reply. Also
+    # respects the memory toggle above, since it's still "Ollie
+    # learning things about you" in spirit.
+    if memory_enabled:
+        maybe_track_interest(user_id, message)
 
     # Daily streak — credits at most once per local calendar day,
     # so this is safe to call on every message.
@@ -587,9 +623,14 @@ def _process_image_message(
 
     language = detect_language(caption) if caption and caption.strip() else "english"
 
-    memories = db.get_relevant_memories(user_id)
-    context = db.get_user_context(user_id)
-    memory_block = build_memory_context(memories, context)
+    # Same memory-toggle respect as the text pipeline -- see
+    # _process_chat_message.
+    if current_user.get("memory_enabled") is not False:
+        memories = db.get_relevant_memories(user_id)
+        context = db.get_user_context(user_id)
+        memory_block = build_memory_context(memories, context)
+    else:
+        memory_block = ""
 
     raw_history = db.get_recent_messages(user_id, limit=12)
     server_history = clean_history(raw_history)

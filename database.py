@@ -221,7 +221,7 @@ class OllieDB:
             history.append({"role": role, "content": msg["message"]})
         return history
 
-    def save_memory(self, user_id: str, memory_text: str, importance: int = 1):
+    def save_memory(self, user_id: str, memory_text: str, importance: int = 1, category: str | None = None):
         # Check for duplicate before saving
         existing = self.supabase.table("memories") \
             .select("id") \
@@ -229,12 +229,15 @@ class OllieDB:
             .eq("memory_text", memory_text) \
             .execute()
         if not existing.data:
-            self.supabase.table("memories").insert({
+            row = {
                 "user_id": user_id,
                 "memory_text": memory_text,
                 "importance": importance,
-                "is_active": True
-            }).execute()
+                "is_active": True,
+            }
+            if category:
+                row["category"] = category
+            self.supabase.table("memories").insert(row).execute()
 
     def get_relevant_memories(self, user_id: str, limit: int = 5):
         response = self.supabase.table("memories") \
@@ -242,9 +245,47 @@ class OllieDB:
             .eq("user_id", user_id) \
             .eq("is_active", True) \
             .order("importance", desc=True) \
+            .order("created_at", desc=True) \
             .limit(limit) \
             .execute()
         return response.data
+
+    def get_all_memories(self, user_id: str, limit: int = 200):
+        """
+        Unfiltered (not capped to the top few by importance) list for
+        the Settings memory management screen -- most recent first.
+        """
+        response = self.supabase.table("memories") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .eq("is_active", True) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .execute()
+        return response.data or []
+
+    def update_memory(self, user_id: str, memory_id: str, memory_text: str | None = None, category: str | None = None) -> bool:
+        """Scoped to user_id so one user can't edit another's memory by guessing an id."""
+        updates = {"updated_at": datetime.now(timezone.utc).isoformat()}
+        if memory_text is not None:
+            updates["memory_text"] = memory_text
+        if category is not None:
+            updates["category"] = category
+        result = self.supabase.table("memories") \
+            .update(updates) \
+            .eq("id", memory_id) \
+            .eq("user_id", user_id) \
+            .execute()
+        return bool(result.data)
+
+    def delete_memory(self, user_id: str, memory_id: str) -> bool:
+        """Scoped to user_id -- see update_memory."""
+        result = self.supabase.table("memories") \
+            .delete() \
+            .eq("id", memory_id) \
+            .eq("user_id", user_id) \
+            .execute()
+        return bool(result.data)
 
     def update_mood(self, user_id: str, mood: str, note: str = None):
         today = date.today().isoformat()
@@ -275,6 +316,22 @@ class OllieDB:
                 "title": title,
                 "status": "active",
             }).execute()
+
+    def complete_goal(self, user_id: str, title: str) -> bool:
+        """
+        Marks an active goal completed -- exact-title match, scoped
+        to this user. Returns whether a row actually matched.
+        """
+        result = self.supabase.table("goals") \
+            .update({
+                "status": "completed",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }) \
+            .eq("user_id", user_id) \
+            .eq("status", "active") \
+            .eq("title", title) \
+            .execute()
+        return bool(result.data)
 
     def get_user_context(self, user_id: str):
         memories = self.get_relevant_memories(user_id)
