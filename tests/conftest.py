@@ -28,6 +28,30 @@ import pytest
 from unittest.mock import MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters():
+    """
+    Every @limiter.limit(...)-decorated route is exercised here by
+    calling the route function directly with a minimal synthetic
+    Request (real starlette.requests.Request -- slowapi rejects a
+    MagicMock). That synthetic request always has the same fake
+    client address and a generic path, so without this, slowapi's
+    in-memory counters -- which persist for the life of the process,
+    not just one test -- silently pool call counts across unrelated
+    tests and even unrelated routes, eventually tripping
+    RateLimitExceeded on a test that did nothing wrong. Reset all
+    three Limiter instances before every test so each one starts
+    from a clean slate.
+    """
+    import auth
+    import chat
+    import app as app_module
+    auth.limiter.reset()
+    chat.limiter.reset()
+    app_module.limiter.reset()
+    yield
+
+
 @pytest.fixture
 def mock_chat_completion():
     """
