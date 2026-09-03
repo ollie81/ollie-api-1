@@ -3,6 +3,7 @@
 # ============================================================
 from contextlib import asynccontextmanager
 
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -10,7 +11,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from config import ALLOWED_ORIGINS
+from config import ALLOWED_ORIGINS, SENTRY_DSN
 from auth import router as auth_router, cleanup_expired_refresh_tokens
 from chat import router as chat_router
 from premium import router as premium_router
@@ -20,6 +21,13 @@ from daily_message import run_daily_messages
 from settings import router as settings_router
 from journey import router as journey_router
 from database import purge_expired_account_deletions
+
+# dsn=None is Sentry's own documented no-op -- fine to always call
+# this even before SENTRY_DSN is actually set to anything.
+sentry_sdk.init(
+    dsn=SENTRY_DSN,
+    send_default_pii=False,
+)
 # ============================================================
 # SCHEDULER — checks for due event check-ins periodically, sweeps
 # out expired refresh tokens once a day, and carries out any account
