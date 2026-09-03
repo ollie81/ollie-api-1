@@ -38,7 +38,7 @@ REFRESH_TOKEN_EXPIRE_DAYS = 30
 # ============================================================
 
 GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON")
-ANDROID_PACKAGE_NAME = os.getenv("ANDROID_PACKAGE_NAME", "com.example.ollie_app")
+ANDROID_PACKAGE_NAME = os.getenv("ANDROID_PACKAGE_NAME", "com.oliviranzi.ollie")
 
 # The Flutter client owns the full set of product IDs (monthly,
 # yearly, lifetime -- see purchase_service.dart) and passes whichever
