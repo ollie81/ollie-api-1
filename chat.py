@@ -494,7 +494,8 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
 # ============================================================
 
 @router.post("/chat")
-def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit("20/minute")
+def chat(req: ChatRequest, request: Request, current_user: dict = Depends(get_current_user)):
     db = OllieDB()
     user_id = current_user["id"]
 
@@ -536,7 +537,9 @@ def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
 # ============================================================
 
 @router.post("/chat/voice")
+@limiter.limit("10/minute")
 async def chat_voice(
+    request: Request,
     audio: UploadFile = File(...),
     utc_offset_minutes: int | None = Form(None),
     mode: str | None = Form(None),
@@ -660,7 +663,8 @@ def _generate_mode_opener(user_id: str, mode: str, current_user: dict, utc_offse
 
 
 @router.post("/chat/mode-starter")
-def chat_mode_starter(req: ModeStarterRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit("10/minute")
+def chat_mode_starter(req: ModeStarterRequest, request: Request, current_user: dict = Depends(get_current_user)):
     if req.mode not in MODE_LABELS:
         raise HTTPException(status_code=400, detail="Unknown mode")
 
@@ -725,7 +729,8 @@ def _generate_welcome_message(name: str, current_user: dict, utc_offset_minutes:
 
 
 @router.post("/chat/welcome")
-def chat_welcome(req: WelcomeRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit("5/minute")
+def chat_welcome(req: WelcomeRequest, request: Request, current_user: dict = Depends(get_current_user)):
     db = OllieDB()
     user_id = current_user["id"]
     name = req.name.strip()[:50] or "there"
@@ -868,7 +873,9 @@ def _process_image_message(
 
 
 @router.post("/chat/image")
+@limiter.limit("10/minute")
 async def chat_image(
+    request: Request,
     image: UploadFile = File(...),
     caption: str | None = Form(None),
     utc_offset_minutes: int | None = Form(None),
@@ -952,7 +959,8 @@ def _synthesize_speech(text: str) -> bytes:
 
 
 @router.post("/speak")
-def speak(req: SpeakRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit("20/minute")
+def speak(req: SpeakRequest, request: Request, current_user: dict = Depends(get_current_user)):
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
