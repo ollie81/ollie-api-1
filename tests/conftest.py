@@ -45,9 +45,11 @@ def _reset_rate_limiters():
     """
     import auth
     import chat
+    import settings
     import app as app_module
     auth.limiter.reset()
     chat.limiter.reset()
+    settings.limiter.reset()
     app_module.limiter.reset()
     yield
 
