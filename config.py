@@ -63,3 +63,12 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 # ============================================================
 
 SENTRY_DSN = os.getenv("SENTRY_DSN")
+
+# ============================================================
+# ELEVENLABS (Ollie's cloned voice) — optional. Absent means
+# chat._synthesize_speech falls back to OpenAI's preset TTS voice,
+# same no-op-if-unset pattern as everything else on this page.
+# ============================================================
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
