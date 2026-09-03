@@ -5,8 +5,10 @@
 import logging
 from datetime import datetime, timezone
 from typing import Literal
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from database import supabase, OllieDB
 from auth import get_current_user
@@ -15,6 +17,7 @@ from premium import is_premium_active
 logger = logging.getLogger("ollie.settings")
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 class NotificationToggleRequest(BaseModel):
@@ -289,7 +292,8 @@ def clear_memory(current_user: dict = Depends(get_current_user)):
 # ============================================================
 
 @router.get("/export-data")
-def export_data(current_user: dict = Depends(get_current_user)):
+@limiter.limit("5/minute")
+def export_data(request: Request, current_user: dict = Depends(get_current_user)):
     try:
         db = OllieDB()
         data = db.export_user_data(current_user["id"])
@@ -313,7 +317,8 @@ def export_data(current_user: dict = Depends(get_current_user)):
 # ============================================================
 
 @router.post("/delete-account")
-def request_delete_account(req: DeleteAccountRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit("5/minute")
+def request_delete_account(req: DeleteAccountRequest, request: Request, current_user: dict = Depends(get_current_user)):
     if req.confirmation.strip() != DELETE_ACCOUNT_CONFIRMATION_PHRASE:
         raise HTTPException(
             status_code=400,

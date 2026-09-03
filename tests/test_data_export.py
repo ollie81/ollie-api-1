@@ -8,8 +8,17 @@
 
 from unittest.mock import patch, MagicMock
 
+from starlette.requests import Request
+
 from database import OllieDB
 from settings import export_data
+
+
+def _fake_request(path="/"):
+    return Request(scope={
+        "type": "http", "method": "GET", "path": path,
+        "headers": [], "client": ("testclient", 123), "query_string": b"",
+    })
 
 
 def _mock_result(data):
@@ -118,7 +127,7 @@ def test_export_data_route_includes_exported_at_and_spreads_categories():
             "conversations": [],
         }
 
-        result = export_data(current_user={"id": "user-1"})
+        result = export_data(_fake_request(), current_user={"id": "user-1"})
 
         assert "exported_at" in result
         assert result["profile"] == {"username": "Olivia"}
