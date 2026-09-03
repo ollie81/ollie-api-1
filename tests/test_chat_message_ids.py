@@ -15,7 +15,16 @@
 
 from unittest.mock import patch, MagicMock
 
+from starlette.requests import Request
+
 from chat import _process_chat_message, chat, ChatRequest
+
+
+def _fake_request(path="/"):
+    return Request(scope={
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "client": ("testclient", 123), "query_string": b"",
+    })
 
 
 def _mock_db(save_message_ids=("user-msg-1", "ollie-msg-1"), streak=5):
@@ -101,7 +110,7 @@ def test_chat_route_forwards_reply_to_id_to_process_chat_message():
          patch("chat._process_chat_message", return_value={"reply": "hi!"}) as mock_process:
         req = ChatRequest(message="about that...", reply_to_id="ollie-msg-9")
 
-        chat(req, current_user={"id": "user-1"})
+        chat(req, _fake_request(), current_user={"id": "user-1"})
 
         mock_process.assert_called_once()
         assert mock_process.call_args.kwargs.get("reply_to_id") == "ollie-msg-9"

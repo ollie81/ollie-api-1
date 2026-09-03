@@ -9,8 +9,16 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from chat import chat_welcome, WelcomeRequest
+
+
+def _fake_request(path="/"):
+    return Request(scope={
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "client": ("testclient", 123), "query_string": b"",
+    })
 
 
 # ---- _generate_welcome_message ----
@@ -56,7 +64,7 @@ def test_route_saves_greeting_to_history_and_returns_it():
          patch("chat._generate_welcome_message", return_value="hey Olivia! so excited to meet you"):
         mock_db_cls.return_value.get_or_create_session.return_value = "session-1"
 
-        result = chat_welcome(WelcomeRequest(name="Olivia"), current_user={"id": "user-1"})
+        result = chat_welcome(WelcomeRequest(name="Olivia"), _fake_request(), current_user={"id": "user-1"})
 
         assert result == {"reply": "hey Olivia! so excited to meet you"}
         mock_db_cls.return_value.save_message.assert_called_once_with(
@@ -69,7 +77,7 @@ def test_route_passes_trimmed_name_to_generation():
          patch("chat._generate_welcome_message", return_value="hey!") as mock_generate:
         mock_db_cls.return_value.get_or_create_session.return_value = "session-1"
 
-        chat_welcome(WelcomeRequest(name="  Olivia  "), current_user={"id": "user-1"})
+        chat_welcome(WelcomeRequest(name="  Olivia  "), _fake_request(), current_user={"id": "user-1"})
 
         assert mock_generate.call_args[0][0] == "Olivia"
 
@@ -79,7 +87,7 @@ def test_route_defaults_to_a_generic_greeting_word_when_name_is_blank():
          patch("chat._generate_welcome_message", return_value="hey!") as mock_generate:
         mock_db_cls.return_value.get_or_create_session.return_value = "session-1"
 
-        chat_welcome(WelcomeRequest(name="   "), current_user={"id": "user-1"})
+        chat_welcome(WelcomeRequest(name="   "), _fake_request(), current_user={"id": "user-1"})
 
         assert mock_generate.call_args[0][0] == "there"
 
@@ -88,5 +96,5 @@ def test_route_failure_returns_500_not_raw_exception():
     with patch("chat.OllieDB") as mock_db_cls:
         mock_db_cls.return_value.get_or_create_session.side_effect = Exception("db down")
         with pytest.raises(HTTPException) as exc_info:
-            chat_welcome(WelcomeRequest(name="Olivia"), current_user={"id": "user-1"})
+            chat_welcome(WelcomeRequest(name="Olivia"), _fake_request(), current_user={"id": "user-1"})
         assert exc_info.value.status_code == 500

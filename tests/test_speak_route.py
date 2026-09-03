@@ -19,8 +19,16 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from chat import speak, SpeakRequest
+
+
+def _fake_request(path="/"):
+    return Request(scope={
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "client": ("testclient", 123), "query_string": b"",
+    })
 
 
 def _mock_db(mock_db_cls, *, trial_ok=True, remaining=42, trial_raises=None, remaining_raises=None):
@@ -37,7 +45,7 @@ def _mock_db(mock_db_cls, *, trial_ok=True, remaining=42, trial_raises=None, rem
 
 
 def _run(message="hey there", user_id="user-1"):
-    return speak(SpeakRequest(message=message), current_user={"id": user_id})
+    return speak(SpeakRequest(message=message), _fake_request(), current_user={"id": user_id})
 
 
 def test_trial_check_exception_returns_clean_500_not_unhandled():

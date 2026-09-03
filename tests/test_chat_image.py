@@ -15,8 +15,16 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from chat import chat_image, MAX_IMAGE_BYTES
+
+
+def _fake_request(path="/"):
+    return Request(scope={
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "client": ("testclient", 123), "query_string": b"",
+    })
 
 
 class _FakeUpload:
@@ -32,6 +40,7 @@ class _FakeUpload:
 def _run(image_bytes=b"fake image bytes", caption=None, utc_offset_minutes=None, user_id="user-1",
          content_type="image/jpeg"):
     return asyncio.run(chat_image(
+        request=_fake_request(),
         image=_FakeUpload(image_bytes, content_type=content_type),
         caption=caption,
         utc_offset_minutes=utc_offset_minutes,

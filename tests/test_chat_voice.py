@@ -19,9 +19,17 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from chat import chat_voice
 from database import VOICE_INPUT_TRIAL_COST_SECONDS
+
+
+def _fake_request(path="/"):
+    return Request(scope={
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "client": ("testclient", 123), "query_string": b"",
+    })
 
 
 class _FakeUpload:
@@ -35,6 +43,7 @@ class _FakeUpload:
 
 def _run(audio_bytes=b"fake audio bytes", utc_offset_minutes=None, user_id="user-1"):
     return asyncio.run(chat_voice(
+        request=_fake_request(),
         audio=_FakeUpload(audio_bytes),
         utc_offset_minutes=utc_offset_minutes,
         current_user={"id": user_id},

@@ -69,3 +69,7 @@ app.include_router(journey_router, prefix="/journey")
 @app.get("/")
 def root():
     return {"message": "Ollie API is running 🚀"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

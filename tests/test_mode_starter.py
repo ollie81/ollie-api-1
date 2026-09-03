@@ -9,9 +9,17 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from chat import chat_mode_starter, ModeStarterRequest
 from modes import MODE_OPENER_FALLBACKS
+
+
+def _fake_request(path="/"):
+    return Request(scope={
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "client": ("testclient", 123), "query_string": b"",
+    })
 
 
 # ---- _generate_mode_opener ----
@@ -71,7 +79,7 @@ def test_route_saves_opener_to_history_and_returns_it():
          patch("chat._generate_mode_opener", return_value="hey! what are we studying today?"):
         mock_db_cls.return_value.get_or_create_session.return_value = "session-1"
 
-        result = chat_mode_starter(ModeStarterRequest(mode="study"), current_user={"id": "user-1"})
+        result = chat_mode_starter(ModeStarterRequest(mode="study"), _fake_request(), current_user={"id": "user-1"})
 
         assert result == {"reply": "hey! what are we studying today?", "mode": "study"}
         mock_db_cls.return_value.save_message.assert_called_once_with(
@@ -81,7 +89,7 @@ def test_route_saves_opener_to_history_and_returns_it():
 
 def test_route_rejects_unknown_mode():
     with pytest.raises(HTTPException) as exc_info:
-        chat_mode_starter(ModeStarterRequest(mode="not_a_real_mode"), current_user={"id": "user-1"})
+        chat_mode_starter(ModeStarterRequest(mode="not_a_real_mode"), _fake_request(), current_user={"id": "user-1"})
     assert exc_info.value.status_code == 400
 
 
@@ -90,7 +98,7 @@ def test_route_does_not_touch_streak_or_message_count():
          patch("chat._generate_mode_opener", return_value="hey!"):
         mock_db_cls.return_value.get_or_create_session.return_value = "session-1"
 
-        chat_mode_starter(ModeStarterRequest(mode="learn"), current_user={"id": "user-1"})
+        chat_mode_starter(ModeStarterRequest(mode="learn"), _fake_request(), current_user={"id": "user-1"})
 
         mock_db_cls.return_value.update_streak.assert_not_called()
         mock_db_cls.return_value.increment_message_count.assert_not_called()
@@ -101,5 +109,5 @@ def test_route_failure_returns_500_not_raw_exception():
     with patch("chat.OllieDB") as mock_db_cls:
         mock_db_cls.return_value.get_or_create_session.side_effect = Exception("db down")
         with pytest.raises(HTTPException) as exc_info:
-            chat_mode_starter(ModeStarterRequest(mode="practice"), current_user={"id": "user-1"})
+            chat_mode_starter(ModeStarterRequest(mode="practice"), _fake_request(), current_user={"id": "user-1"})
         assert exc_info.value.status_code == 500
