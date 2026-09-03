@@ -54,3 +54,12 @@ PLAY_LIFETIME_PRODUCT_ID = os.getenv("PLAY_LIFETIME_PRODUCT_ID", "ollie_premium_
 # ============================================================
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+
+# ============================================================
+# ERROR MONITORING (Sentry) — optional. Absent/empty means the SDK
+# initializes as a clean no-op (Sentry's own documented behavior for
+# dsn=None), same "third-party service you haven't set up yet doesn't
+# break anything" pattern as GOOGLE_PLAY_SERVICE_ACCOUNT_JSON above.
+# ============================================================
+
+SENTRY_DSN = os.getenv("SENTRY_DSN")
