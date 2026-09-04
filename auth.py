@@ -489,6 +489,7 @@ def reset_password(req: ResetRequest, request: Request):
 
 class GoogleAuthRequest(BaseModel):
     id_token: str
+    date_of_birth: str | None = None
 
 @router.post("/google")
 @limiter.limit("10/minute")
@@ -504,15 +505,33 @@ def google_login(req: GoogleAuthRequest, request: Request):
 
         existing = supabase.table("users").select("*").eq("phone", email).execute()
         is_new_user = not existing.data
+
+        # Google hands over an id_token, never a birthdate -- so a
+        # brand-new account gets the same age gate email/phone signup
+        # already enforce, just one round trip later: the client's
+        # first call has no date_of_birth, gets told to go collect
+        # one, then calls again with it. An existing user is already
+        # past this gate (or predates it), so it's never re-checked
+        # for them -- same "absence never blocks" rule as elsewhere.
+        if is_new_user:
+            if not req.date_of_birth:
+                return {"success": False, "needs_date_of_birth": True}
+            age_gate_error = _check_age_gate(req.date_of_birth)
+            if age_gate_error:
+                raise HTTPException(status_code=400, detail=age_gate_error)
+
         if existing.data:
             user = existing.data[0]
             deletion_cancelled = _cancel_pending_deletion_if_needed(user)
         else:
-            result = supabase.table("users").insert({
+            new_user = {
                 "username": name,
                 "phone": email,
                 "password_hash": ""
-            }).execute()
+            }
+            if req.date_of_birth:
+                new_user["date_of_birth"] = req.date_of_birth
+            result = supabase.table("users").insert(new_user).execute()
             user = result.data[0]
             deletion_cancelled = False
 
@@ -538,6 +557,8 @@ def google_login(req: GoogleAuthRequest, request: Request):
             "username": user.get("username"),
             "deletion_cancelled": deletion_cancelled,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"google_login failed: {e}")
         raise HTTPException(status_code=401, detail="Google sign-in failed")

@@ -3,6 +3,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
+import requests
 from openai import OpenAI
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.responses import Response
@@ -11,7 +12,7 @@ from typing import List
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from config import OPENAI_API_KEY
+from config import OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
 from database import OllieDB, supabase, estimate_speech_seconds, VOICE_INPUT_TRIAL_COST_SECONDS
 from premium import is_premium_active
 from memory import (
@@ -917,25 +918,59 @@ async def chat_image(
 # ============================================================
 # SPEAK ROUTE — streams directly, no file saving
 # ============================================================
-# Uses OpenAI TTS (same OPENAI_API_KEY already used for chat and
-# Whisper transcription -- no separate voice-provider account or
-# API key needed). Previously called Papla Media, which shut down;
-# swapping the provider only ever touches this one function, since
-# every caller (/speak, /speak/preview, and the trial/premium
-# logic around them) just deals in raw audio bytes.
+# Ollie's real cloned voice via ElevenLabs (ELEVENLABS_API_KEY +
+# ELEVENLABS_VOICE_ID) when configured; falls back to OpenAI's preset
+# TTS otherwise, same OPENAI_API_KEY already used for chat and Whisper
+# transcription so there's always a working voice even before
+# ElevenLabs is set up. Every caller (/speak, /speak/preview, and the
+# trial/premium logic around them) just deals in raw audio bytes, so
+# swapping providers only ever touches the two _synthesize_speech_*
+# functions below.
 
-# One of OpenAI's fixed preset voices -- change this one line to
-# try a different voice for Ollie (alternatives: alloy, echo,
-# fable, nova, shimmer).
+# One of OpenAI's fixed preset voices, used only as the ElevenLabs
+# fallback -- change this one line to try a different one
+# (alternatives: alloy, echo, fable, nova, shimmer).
 OLLIE_TTS_VOICE = "echo"
+
+ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
 
 def _synthesize_speech(text: str) -> bytes:
     """
-    Calls OpenAI TTS with retry and returns the raw audio bytes.
     Raises HTTPException(500) itself on failure, so callers don't
     need their own error handling around this.
     """
+    if ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID:
+        return _synthesize_speech_elevenlabs(text)
+    return _synthesize_speech_openai(text)
+
+
+def _synthesize_speech_elevenlabs(text: str) -> bytes:
+    max_retries = 1
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(
+                ELEVENLABS_TTS_URL.format(voice_id=ELEVENLABS_VOICE_ID),
+                headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
+                json={"text": text, "model_id": "eleven_multilingual_v2"},
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.content
+
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"_synthesize_speech: ElevenLabs TTS request failed on attempt {attempt + 1}: {e}")
+
+        if attempt < max_retries:
+            time.sleep(0.5)
+
+    logger.error(f"_synthesize_speech: voice generation failed after retries: {last_error}")
+    raise HTTPException(status_code=500, detail="Voice generation failed")
+
+
+def _synthesize_speech_openai(text: str) -> bytes:
     max_retries = 1
     last_error = None
     for attempt in range(max_retries + 1):
