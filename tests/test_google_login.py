@@ -2,7 +2,11 @@
 # Tests for auth.google_login (POST /auth/google) -- previously
 # entirely untested (only ever mentioned in a comment elsewhere).
 # Focus: is_new_user, added to let the client show onboarding only
-# on a genuinely first-ever Google sign-in, not every login.
+# on a genuinely first-ever Google sign-in, not every login; and the
+# age gate, which for Google (unlike email/phone) can't be checked
+# in the same call that creates the account -- Google never hands
+# over a birthdate, so a new signup's first call is expected to come
+# back asking for one, then retry with it attached.
 # ============================================================
 
 from unittest.mock import patch, MagicMock
@@ -31,6 +35,34 @@ def _mock_token_info(email="new@example.com", name="Olivia"):
     return {"email": email, "name": name}
 
 
+def test_new_google_user_with_no_dob_is_asked_for_one_without_creating_a_row():
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info()), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
+            _mock_result([])
+
+        result = google_login(GoogleAuthRequest(id_token="fake-token"), _fake_request())
+
+        assert result == {"success": False, "needs_date_of_birth": True}
+        mock_supabase.table.return_value.insert.assert_not_called()
+
+
+def test_new_google_user_under_the_age_limit_is_blocked_without_creating_a_row():
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info()), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
+            _mock_result([])
+
+        with pytest.raises(HTTPException) as exc_info:
+            google_login(
+                GoogleAuthRequest(id_token="fake-token", date_of_birth="2018-01-01"),
+                _fake_request(),
+            )
+
+        assert exc_info.value.status_code == 400
+        mock_supabase.table.return_value.insert.assert_not_called()
+
+
 def test_new_google_user_creates_a_row_and_reports_is_new_user_true():
     with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info()), \
          patch("auth.supabase") as mock_supabase:
@@ -39,7 +71,10 @@ def test_new_google_user_creates_a_row_and_reports_is_new_user_true():
         mock_supabase.table.return_value.insert.return_value.execute.return_value = \
             _mock_result([{"id": "user-1", "username": "Olivia"}])
 
-        result = google_login(GoogleAuthRequest(id_token="fake-token"), _fake_request())
+        result = google_login(
+            GoogleAuthRequest(id_token="fake-token", date_of_birth="1990-01-01"),
+            _fake_request(),
+        )
 
         assert result["is_new_user"] is True
         assert result["username"] == "Olivia"
@@ -47,6 +82,7 @@ def test_new_google_user_creates_a_row_and_reports_is_new_user_true():
         insert_call = mock_supabase.table.return_value.insert.call_args_list[0][0][0]
         assert insert_call["phone"] == "new@example.com"
         assert insert_call["username"] == "Olivia"
+        assert insert_call["date_of_birth"] == "1990-01-01"
 
 
 def test_returning_google_user_does_not_insert_and_reports_is_new_user_false():
@@ -66,6 +102,24 @@ def test_returning_google_user_does_not_insert_and_reports_is_new_user_false():
         # asserting insert was never called at all.
         insert_call = mock_supabase.table.return_value.insert.call_args[0][0]
         assert "phone" not in insert_call and "username" not in insert_call
+
+
+def test_returning_google_user_is_never_age_gated_even_with_an_underage_dob():
+    # An existing user is already past this gate (or predates it
+    # entirely) -- a date_of_birth on a login call must be ignored,
+    # never re-checked.
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info(email="returning@example.com")), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
+            _mock_result([{"id": "user-1", "username": "Olivia"}])
+
+        result = google_login(
+            GoogleAuthRequest(id_token="fake-token", date_of_birth="2018-01-01"),
+            _fake_request(),
+        )
+
+        assert result["is_new_user"] is False
+        assert "access_token" in result
 
 
 def test_invalid_token_is_rejected():

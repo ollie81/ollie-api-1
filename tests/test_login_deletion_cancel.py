@@ -110,7 +110,10 @@ def test_google_login_new_user_reports_false_without_an_update_call():
             [{"id": "user-1", "username": "New"}]
         )
 
-        result = google_login(GoogleAuthRequest(id_token="fake-token"), _fake_request())
+        result = google_login(
+            GoogleAuthRequest(id_token="fake-token", date_of_birth="1990-01-01"),
+            _fake_request(),
+        )
 
         assert result["deletion_cancelled"] is False
         mock_supabase.table.return_value.update.assert_not_called()
