@@ -28,6 +28,7 @@ from database import OllieDB, supabase
 from memory import build_memory_context, moderate_text, FAST_MODEL
 from personality import OLLIE_PERSONALITY
 from interest_memory import build_interest_context
+from local_context import get_local_highlight
 from notification_service import NotificationService
 from premium import is_premium_active
 
@@ -69,7 +70,13 @@ DISAPPEARED_FALLBACK_LINES = [
 # MORNING CHECK-IN — generation
 # ============================================================
 
-def _generate_morning_checkin(user_id: str, today_local: date) -> str:
+def _generate_morning_checkin(
+    user_id: str,
+    today_local: date,
+    country: str | None = None,
+    region: str | None = None,
+    district: str | None = None,
+) -> str:
     db = OllieDB()
     try:
         memories = db.get_relevant_memories(user_id)
@@ -103,6 +110,14 @@ def _generate_morning_checkin(user_id: str, today_local: date) -> str:
         if yesterday_mood and yesterday_mood.get("mood"):
             extra_lines.append(f"YESTERDAY'S MOOD: {yesterday_mood['mood']}")
 
+        # A real, current fact tying their location to something
+        # they're already known to care about -- e.g. a match, a
+        # release, a local event. Only present when the search
+        # actually finds one; see local_context.py.
+        local_highlight = get_local_highlight(user_id, country, region, district)
+        if local_highlight:
+            extra_lines.append(f"LOCAL HIGHLIGHT: {local_highlight}")
+
         extra_context = "\n".join(extra_lines)
         full_context = f"{prompt_context}\n{extra_context}" if extra_context else prompt_context
 
@@ -126,8 +141,12 @@ tag tells you how stale that is, so NEVER repeat a relative-time
 phrase like that verbatim; reference the event itself, not a
 countdown from when it was mentioned. Else if "YESTERDAY'S MOOD" reads
 heavy or rough, gently check in on that instead ("yesterday sounded
-rough, feeling any better today?"). Otherwise, reference something
-else specific you remember about them.
+rough, feeling any better today?"). Else if "LOCAL HIGHLIGHT" is
+present, weave it in naturally, like a friend who happened to see it
+and thought of them ("saw arsenal's playing tonight -- you
+watching?") -- state it as fact, never as something you searched for
+or read about, and never sound like a news alert. Otherwise,
+reference something else specific you remember about them.
 
 No greeting-card language, no "As an AI". Sound like a friend texting
 first thing in the morning, not a notification."""
@@ -336,7 +355,10 @@ def _process_morning_checkin(row: dict, now_utc: datetime) -> None:
     if update:
         supabase.table("users").update(update).eq("id", user_id).execute()
     if due:
-        message = _generate_morning_checkin(user_id, today_local)
+        message = _generate_morning_checkin(
+            user_id, today_local,
+            country=row.get("country"), region=row.get("region"), district=row.get("district"),
+        )
         NotificationService.create_notification(user_id=user_id, title="Ollie", body=message)
 
 
@@ -405,7 +427,8 @@ def run_daily_messages() -> None:
             .select("id, last_known_utc_offset_minutes, last_daily_message_date, "
                     "next_daily_message_at, last_nightly_recap_date, "
                     "next_nightly_recap_at, notifications_enabled, "
-                    "notification_frequency, last_message_at, last_disappeared_checkin_at") \
+                    "notification_frequency, last_message_at, last_disappeared_checkin_at, "
+                    "country, region, district") \
             .not_.is_("fcm_token", "null") \
             .not_.is_("last_known_utc_offset_minutes", "null") \
             .execute()

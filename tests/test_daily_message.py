@@ -144,6 +144,24 @@ def test_morning_checkin_sends_when_due():
         assert update_call["last_daily_message_date"] == now.date().isoformat()
 
 
+def test_morning_checkin_passes_location_through_to_generation():
+    now = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
+    target = now - timedelta(minutes=5)
+    row = _base_row(
+        next_daily_message_at=target.isoformat(),
+        country="Rwanda", region="Kigali", district=None,
+    )
+
+    with patch("daily_message.supabase"), \
+         patch("daily_message.NotificationService"), \
+         patch("daily_message._generate_morning_checkin", return_value="hey!") as mock_generate:
+        _process_morning_checkin(row, now)
+
+        mock_generate.assert_called_once_with(
+            "user-1", now.date(), country="Rwanda", region="Kigali", district=None,
+        )
+
+
 def test_morning_checkin_does_not_send_before_due():
     now = datetime.now(timezone.utc).replace(hour=8, minute=0, second=0, microsecond=0)
     row = _base_row()
@@ -303,6 +321,32 @@ def test_morning_checkin_tags_recent_event_with_elapsed_time():
         prompt = mock_client.chat.completions.create.call_args[1]["messages"][0]["content"]
         assert "RECENTLY MENTIONED (about 5h ago), MIGHT BE TODAY: meeting a friend in 12 minutes" in prompt
         assert "never repeat a relative-time" in prompt.lower()
+
+
+def test_morning_checkin_surfaces_a_local_highlight_when_found():
+    with patch("daily_message.OllieDB") as mock_db_cls, \
+         patch("daily_message.build_memory_context", return_value=""), \
+         patch("daily_message.build_interest_context", return_value=""), \
+         patch("daily_message.get_local_highlight", return_value="Arsenal play tonight at 8pm.") as mock_highlight, \
+         patch("daily_message.openai_client") as mock_client, \
+         patch("daily_message.moderate_text", return_value=None):
+        mock_db_cls.return_value.get_relevant_memories.return_value = []
+        mock_db_cls.return_value.get_user_context.return_value = {}
+        mock_db_cls.return_value.get_memories_by_category.return_value = []
+        mock_db_cls.return_value.get_mood_for_date.return_value = None
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="morning! arsenal's on tonight"))
+        ]
+
+        result = daily_message._generate_morning_checkin(
+            "user-1", datetime.now(timezone.utc).date(),
+            country="Rwanda", region="Kigali", district=None,
+        )
+
+        assert result == "morning! arsenal's on tonight"
+        mock_highlight.assert_called_once_with("user-1", "Rwanda", "Kigali", None)
+        prompt = mock_client.chat.completions.create.call_args[1]["messages"][0]["content"]
+        assert "LOCAL HIGHLIGHT: Arsenal play tonight at 8pm." in prompt
 
 
 def test_morning_checkin_no_context_at_all_falls_back():
