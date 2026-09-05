@@ -89,8 +89,15 @@ def _generate_morning_checkin(user_id: str, today_local: date) -> str:
         )
         for event in recent_events[:2]:
             text = (event.get("memory_text") or "").strip()
-            if text:
-                extra_lines.append(f"RECENTLY MENTIONED, MIGHT BE TODAY: {text}")
+            if not text:
+                continue
+            created_at_str = event.get("created_at")
+            if created_at_str:
+                hours_ago = max(0, int((datetime.now(timezone.utc) - OllieDB._parse_utc(created_at_str)).total_seconds() // 3600))
+                when = "less than an hour ago" if hours_ago < 1 else f"about {hours_ago}h ago"
+            else:
+                when = "recently"
+            extra_lines.append(f"RECENTLY MENTIONED ({when}), MIGHT BE TODAY: {text}")
 
         yesterday_mood = db.get_mood_for_date(user_id, today_local - timedelta(days=1))
         if yesterday_mood and yesterday_mood.get("mood"):
@@ -113,10 +120,14 @@ warm morning message (max 2 sentences).
 If "RECENTLY MENTIONED, MIGHT BE TODAY" is present, prioritize that --
 reference the specific thing directly, like a friend who remembered
 ("you said you had that test today -- want to do a quick review
-together?"). Else if "YESTERDAY'S MOOD" reads heavy or rough, gently
-check in on that instead ("yesterday sounded rough, feeling any better
-today?"). Otherwise, reference something else specific you remember
-about them.
+together?"). It may contain a relative time ("in 12 minutes", "in an
+hour") that was only true when they said it -- the "(about Xh ago)"
+tag tells you how stale that is, so NEVER repeat a relative-time
+phrase like that verbatim; reference the event itself, not a
+countdown from when it was mentioned. Else if "YESTERDAY'S MOOD" reads
+heavy or rough, gently check in on that instead ("yesterday sounded
+rough, feeling any better today?"). Otherwise, reference something
+else specific you remember about them.
 
 No greeting-card language, no "As an AI". Sound like a friend texting
 first thing in the morning, not a notification."""
