@@ -175,8 +175,13 @@ def test_refresh_with_a_valid_token_rotates_it_and_keeps_the_same_user():
         result = refresh_token(RefreshRequest(refresh_token="some-refresh-token"))
 
         assert "access_token" in result and "refresh_token" in result
-        # Old token deleted (single-use)...
-        mock_supabase.table.return_value.delete.return_value.eq.assert_called_once()
+        # Old token shortened to a grace window, not deleted outright
+        # (see REFRESH_TOKEN_GRACE_SECONDS) -- a retry with the same
+        # token right after this must still be able to succeed.
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        old_expiry = datetime.fromisoformat(update_call["expires_at"])
+        assert datetime.now(timezone.utc) < old_expiry < datetime.now(timezone.utc) + timedelta(minutes=2)
+        mock_supabase.table.return_value.update.return_value.eq.assert_called_once()
         # ...and the new row is issued for the SAME user the old
         # token belonged to, never anything client-supplied.
         insert_call = mock_supabase.table.return_value.insert.call_args[0][0]
@@ -208,19 +213,21 @@ def test_refresh_with_an_expired_token_is_rejected_and_cleaned_up():
         mock_supabase.table.return_value.delete.return_value.eq.assert_called_once()
 
 
-def test_a_reused_refresh_token_is_rejected_the_second_time():
-    # Simulates the real single-use flow: first call's row exists,
-    # second call (replaying the same now-deleted token) finds nothing.
+def test_a_reused_refresh_token_still_works_within_the_grace_window():
+    # A client that never actually received/saved the rotated tokens
+    # -- the app got killed mid-request, the connection dropped right
+    # as the response came back -- is still holding this exact token
+    # afterward and must be able to retry with it, instead of being
+    # permanently logged out. See REFRESH_TOKEN_GRACE_SECONDS.
     future_expiry = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
     with patch("auth.supabase") as mock_supabase:
-        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
-            _mock_result([{"user_id": "user-1", "expires_at": future_expiry, "token_hash": "old-hash"}]),
-            _mock_result([]),
-        ]
-        refresh_token(RefreshRequest(refresh_token="one-time-token"))
-        with pytest.raises(HTTPException) as exc_info:
-            refresh_token(RefreshRequest(refresh_token="one-time-token"))
-        assert exc_info.value.status_code == 401
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
+            _mock_result([{"user_id": "user-1", "expires_at": future_expiry, "token_hash": "old-hash"}])
+
+        first = refresh_token(RefreshRequest(refresh_token="one-time-token"))
+        second = refresh_token(RefreshRequest(refresh_token="one-time-token"))
+
+        assert "access_token" in first and "access_token" in second
 
 
 # ---- /logout ----

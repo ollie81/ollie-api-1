@@ -22,7 +22,8 @@ from slowapi.util import get_remote_address
 from config import (
     JWT_SECRET, JWT_ALGORITHM,
     ACCESS_TOKEN_EXPIRE_MINUTES,
-    REFRESH_TOKEN_EXPIRE_DAYS
+    REFRESH_TOKEN_EXPIRE_DAYS,
+    REFRESH_TOKEN_GRACE_SECONDS,
 )
 from database import supabase
 from email_service import send_otp_email
@@ -369,7 +370,19 @@ def refresh_token(req: RefreshRequest):
         raise HTTPException(status_code=401, detail="Refresh token expired")
 
     user_id = token_row["user_id"]
-    supabase.table("refresh_tokens").delete().eq("token_hash", hashed).execute()
+
+    # Grace window instead of immediate deletion. If the response
+    # carrying the new tokens never actually lands client-side --
+    # the app gets killed mid-request, the connection drops right
+    # as it comes back -- the client is still holding THIS token
+    # with no way to recover once it's deleted: every future
+    # /refresh attempt 401s with "Invalid refresh token", silently
+    # and permanently ending an otherwise-active session days
+    # before REFRESH_TOKEN_EXPIRE_DAYS was actually up. Shortening
+    # its life instead lets a retry with the same token still work.
+    supabase.table("refresh_tokens").update({
+        "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=REFRESH_TOKEN_GRACE_SECONDS)).isoformat()
+    }).eq("token_hash", hashed).execute()
 
     new_access_token = create_access_token(user_id)
     new_refresh_token = create_refresh_token()
