@@ -53,6 +53,21 @@ PLAY_MONTHLY_PRODUCT_ID = os.getenv("PLAY_MONTHLY_PRODUCT_ID", "ollie_premium_mo
 PLAY_LIFETIME_PRODUCT_ID = os.getenv("PLAY_LIFETIME_PRODUCT_ID", "ollie_premium_lifetime")
 
 # ============================================================
+# STRIPE (web premium purchases) — the web client has no app-store
+# equivalent to Google Play Billing, so it buys premium through a
+# Stripe Checkout subscription instead (see billing.py). Optional,
+# same no-op-if-unset pattern as the other third-party keys here:
+# absent just means /billing/create-checkout-session 500s until set.
+# ============================================================
+
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_MONTHLY = os.getenv("STRIPE_PRICE_MONTHLY")
+STRIPE_PRICE_YEARLY = os.getenv("STRIPE_PRICE_YEARLY")
+# Where Stripe Checkout sends the browser back to after payment.
+WEB_APP_URL = os.getenv("WEB_APP_URL", "http://localhost:5173")
+
+# ============================================================
 # CORS
 # ============================================================
 
