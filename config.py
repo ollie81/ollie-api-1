@@ -53,28 +53,14 @@ PLAY_MONTHLY_PRODUCT_ID = os.getenv("PLAY_MONTHLY_PRODUCT_ID", "ollie_premium_mo
 PLAY_LIFETIME_PRODUCT_ID = os.getenv("PLAY_LIFETIME_PRODUCT_ID", "ollie_premium_lifetime")
 
 # ============================================================
-# FLUTTERWAVE (web premium purchases) — the web client has no
-# app-store equivalent to Google Play Billing, so it buys premium
-# through Flutterwave instead (see billing.py). Stripe doesn't
-# support Rwanda as a merchant country; Flutterwave does, and also
-# accepts international cards from anywhere plus MTN/Airtel Mobile
-# Money locally. Optional, same no-op-if-unset pattern as the other
-# third-party keys here: absent just means
-# /billing/create-checkout-session 500s until set.
+# WEB APP — the web client has no app-store equivalent to Google
+# Play Billing, so it needs its own payment processor for premium
+# (not yet chosen -- Stripe doesn't support Rwanda as a merchant
+# country, and Flutterwave requires business registration, which
+# isn't available yet either). WEB_APP_URL is still needed as the
+# origin CORS/redirect-back settings key off, independent of that.
 # ============================================================
 
-FLUTTERWAVE_SECRET_KEY = os.getenv("FLUTTERWAVE_SECRET_KEY")
-FLUTTERWAVE_WEBHOOK_SECRET_HASH = os.getenv("FLUTTERWAVE_WEBHOOK_SECRET_HASH")
-# Numeric Payment Plan ids (create these in the Flutterwave dashboard
-# or via POST /v3/payment-plans first -- see billing.py).
-FLUTTERWAVE_PLAN_MONTHLY = os.getenv("FLUTTERWAVE_PLAN_MONTHLY")
-FLUTTERWAVE_PLAN_YEARLY = os.getenv("FLUTTERWAVE_PLAN_YEARLY")
-# Must match the amount each plan above was created with.
-FLUTTERWAVE_PRICE_MONTHLY = os.getenv("FLUTTERWAVE_PRICE_MONTHLY")
-FLUTTERWAVE_PRICE_YEARLY = os.getenv("FLUTTERWAVE_PRICE_YEARLY")
-FLUTTERWAVE_CURRENCY = os.getenv("FLUTTERWAVE_CURRENCY", "USD")
-# Where Flutterwave's hosted checkout sends the browser back to after
-# payment.
 WEB_APP_URL = os.getenv("WEB_APP_URL", "http://localhost:5173")
 
 # ============================================================

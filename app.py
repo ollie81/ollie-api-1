@@ -15,7 +15,6 @@ from config import ALLOWED_ORIGINS, SENTRY_DSN
 from auth import router as auth_router, cleanup_expired_refresh_tokens
 from chat import router as chat_router
 from premium import router as premium_router
-from billing import router as billing_router
 from notifications import router as notifications_router
 from event_scheduler import run_due_notifications
 from daily_message import run_daily_messages
@@ -71,7 +70,6 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth")
 app.include_router(chat_router)
 app.include_router(premium_router, prefix="/premium")
-app.include_router(billing_router, prefix="/billing")
 app.include_router(notifications_router, prefix="/notifications")
 app.include_router(settings_router, prefix="/settings")
 app.include_router(journey_router, prefix="/journey")
