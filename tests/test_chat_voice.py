@@ -41,11 +41,21 @@ class _FakeUpload:
         return self._data
 
 
-def _run(audio_bytes=b"fake audio bytes", utc_offset_minutes=None, user_id="user-1"):
+def _run(audio_bytes=b"fake audio bytes", utc_offset_minutes=None, user_id="user-1", mode=None, include_audio=False):
+    # mode/include_audio must be passed explicitly here (not left to
+    # their Form(...) defaults) -- calling the route function
+    # directly like this skips FastAPI's own request parsing, which
+    # is normally what resolves a Form(...) default down to a plain
+    # value. Left unset, the parameter would be the Form marker
+    # object itself, not False/None -- harmless for mode (only ever
+    # forwarded to a mock in these tests) but include_audio is
+    # actually branched on below, so it must be a real bool.
     return asyncio.run(chat_voice(
         request=_fake_request(),
         audio=_FakeUpload(audio_bytes),
         utc_offset_minutes=utc_offset_minutes,
+        mode=mode,
+        include_audio=include_audio,
         current_user={"id": user_id},
     ))
 
@@ -185,6 +195,80 @@ def test_trial_balance_read_failure_does_not_discard_successful_reply():
         assert result["reply"] == "hey!"
         assert result["transcribed_text"] == "hello there"
         assert "voice_trial_seconds_remaining" not in result
+
+
+# ============================================================
+# include_audio=True -- the web client's combined exchange: one
+# request, one daily charge (OllieDB.try_consume_voice_exchange_
+# today), Ollie's spoken reply bundled into the same response
+# instead of a separate /speak call.
+# ============================================================
+
+def test_include_audio_charges_the_daily_exchange_not_the_seconds_trial():
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
+         patch("chat.openai_client") as mock_openai, \
+         patch("chat._process_chat_message", return_value={"reply": "hey!"}), \
+         patch("chat._synthesize_speech", return_value=b"fake mp3 bytes"):
+        db = mock_db_cls.return_value
+        db.try_consume_voice_exchange_today.return_value = True
+        _mock_transcription(mock_openai)
+
+        result = _run(include_audio=True)
+
+        db.try_consume_voice_exchange_today.assert_called_once_with("user-1")
+        db.try_consume_voice_trial.assert_not_called()
+        assert result["audio_base64"] == "ZmFrZSBtcDMgYnl0ZXM="  # base64 of b"fake mp3 bytes"
+        # Wrong pool for this path -- would be misleading if present.
+        assert "voice_trial_seconds_remaining" not in result
+
+
+def test_include_audio_without_daily_exchange_available_gets_402_before_transcribing():
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
+         patch("chat.openai_client") as mock_openai:
+        mock_db_cls.return_value.try_consume_voice_exchange_today.return_value = False
+
+        with pytest.raises(HTTPException) as exc_info:
+            _run(include_audio=True)
+
+        assert exc_info.value.status_code == 402
+        mock_openai.audio.transcriptions.create.assert_not_called()
+
+
+def test_include_audio_premium_user_skips_daily_check_but_still_gets_audio():
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=True), \
+         patch("chat.openai_client") as mock_openai, \
+         patch("chat._process_chat_message", return_value={"reply": "hey!"}), \
+         patch("chat._synthesize_speech", return_value=b"fake mp3 bytes") as mock_synth:
+        db = mock_db_cls.return_value
+        _mock_transcription(mock_openai)
+
+        result = _run(include_audio=True)
+
+        db.try_consume_voice_exchange_today.assert_not_called()
+        mock_synth.assert_called_once_with("hey!")
+        assert "audio_base64" in result
+
+
+def test_include_audio_synthesis_failure_does_not_discard_successful_reply():
+    # Same "already fully processed and saved, don't discard it"
+    # principle as the seconds-trial-balance-read-failure case above
+    # -- a TTS hiccup here must still return the text reply.
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
+         patch("chat.openai_client") as mock_openai, \
+         patch("chat._process_chat_message", return_value={"reply": "hey!"}), \
+         patch("chat._synthesize_speech", side_effect=HTTPException(status_code=500, detail="Voice generation failed")):
+        mock_db_cls.return_value.try_consume_voice_exchange_today.return_value = True
+        _mock_transcription(mock_openai)
+
+        result = _run(include_audio=True)
+
+        assert result["reply"] == "hey!"
+        assert result["transcribed_text"] == "hello there"
+        assert "audio_base64" not in result
 
 
 def test_premium_status_reused_for_response_shape_not_rechecked():

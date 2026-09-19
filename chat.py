@@ -544,6 +544,13 @@ async def chat_voice(
     audio: UploadFile = File(...),
     utc_offset_minutes: int | None = Form(None),
     mode: str | None = Form(None),
+    # Web client only (see OllieDB.try_consume_voice_exchange_today):
+    # bundles Ollie's spoken reply into this same response instead of
+    # a separate /speak call, so the whole exchange -- hearing the
+    # user and speaking the reply -- is exactly one daily charge, not
+    # two. Omitted/false preserves the exact previous behavior (the
+    # Android app's flow: text-only response, lifetime seconds trial).
+    include_audio: bool = Form(False),
     current_user: dict = Depends(get_current_user),
 ):
     db = OllieDB()
@@ -568,7 +575,11 @@ async def chat_voice(
     # plain-text response the client can't parse a message out of.
     if not is_premium:
         try:
-            trial_ok = db.try_consume_voice_trial(user_id, VOICE_INPUT_TRIAL_COST_SECONDS)
+            trial_ok = (
+                db.try_consume_voice_exchange_today(user_id)
+                if include_audio
+                else db.try_consume_voice_trial(user_id, VOICE_INPUT_TRIAL_COST_SECONDS)
+            )
         except Exception as e:
             logger.error(f"chat_voice: trial check failed for user {user_id}: {e}")
             raise HTTPException(status_code=500, detail="Could not check your voice trial, please try again")
@@ -602,7 +613,18 @@ async def chat_voice(
         raise HTTPException(status_code=500, detail="Something went wrong, please try again")
 
     result["transcribed_text"] = transcribed_text
-    if not is_premium:
+
+    if include_audio:
+        # Best-effort -- the reply is already fully processed and
+        # saved by this point, so a synthesis hiccup must not turn an
+        # otherwise-successful reply into a hard failure. The client
+        # just gets a text-only reply back, same as a plain /chat
+        # response, rather than nothing at all.
+        try:
+            result["audio_base64"] = base64.b64encode(_synthesize_speech(result["reply"])).decode()
+        except Exception as e:
+            logger.warning(f"chat_voice: reply speech synthesis failed for user {user_id}: {e}")
+    elif not is_premium:
         # Best-effort -- the reply above is already fully processed
         # and saved (conversation history, memory, streak, everything
         # committed), so a hiccup reading the trial balance here must
