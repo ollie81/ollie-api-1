@@ -81,10 +81,10 @@ def is_premium_active(user_id: str) -> bool:
     if expiry_ms <= 0 or now_ms < expiry_ms:
         return True
 
-    # A Stripe-sourced row (see billing.py) has no Play purchase to
-    # re-verify against, and doesn't need one — Stripe's webhook
-    # keeps expiry_time_millis current on every renewal/cancellation,
-    # so a locally-expired one really is expired.
+    # A web-purchased row (source="flutterwave", see billing.py) has
+    # no Play purchase to re-verify against, and doesn't need one --
+    # its own webhook keeps expiry_time_millis current on every
+    # renewal, so a locally-expired one really is expired.
     if sub.get("source", "play") != "play":
         return False
 

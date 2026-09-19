@@ -1,9 +1,9 @@
 # ============================================================
-# Tests for billing.py — the Stripe checkout/webhook routes the
-# web client uses to buy premium (the Android app's equivalent is
-# premium.activate_premium, verified against Google Play instead).
-# Mocks the supabase client and the stripe SDK calls; never touches
-# a real Stripe account.
+# Tests for billing.py — the Flutterwave checkout/webhook routes
+# the web client uses to buy premium (the Android app's equivalent
+# is premium.activate_premium, verified against Google Play
+# instead). Mocks `requests` and the supabase client; never makes a
+# real network call.
 # ============================================================
 
 import asyncio
@@ -13,194 +13,245 @@ import pytest
 from fastapi import HTTPException
 
 import billing
-from billing import create_checkout_session, stripe_webhook
+from billing import create_checkout_session, flutterwave_webhook
 
-CURRENT_USER = {"id": "user-1"}
+CURRENT_USER = {"id": "user-1", "email": "user1@example.com"}
 
 
-def _fake_request(body: bytes, signature="sig"):
+def _fake_response(status_code=200, json_body=None):
+    response = MagicMock()
+    response.status_code = status_code
+    response.json.return_value = json_body or {}
+    return response
+
+
+def _fake_request(body: dict, verif_hash="secret-hash"):
     request = MagicMock()
 
-    async def _body():
+    async def _json():
         return body
 
-    request.body = _body
-    request.headers = {"stripe-signature": signature}
+    request.json = _json
+    request.headers = {"verif-hash": verif_hash}
     return request
 
 
 def _run_webhook(request):
     # No pytest-asyncio in this codebase (every other route here is
-    # sync) -- stripe_webhook is the one async route (it awaits
-    # request.body()), so it's driven directly rather than pulling
-    # in a new test dependency for just this one handler.
-    return asyncio.run(stripe_webhook(request))
+    # sync) -- flutterwave_webhook is the one async route (it awaits
+    # request.json()), so it's driven directly rather than pulling in
+    # a new test dependency for just this one handler.
+    return asyncio.run(flutterwave_webhook(request))
+
+
+_CONFIGURED = {
+    "billing.FLUTTERWAVE_SECRET_KEY": "flw_test_fake",
+    "billing.FLUTTERWAVE_PLAN_MONTHLY": "111",
+    "billing.FLUTTERWAVE_PLAN_YEARLY": "222",
+    "billing.FLUTTERWAVE_PRICE_MONTHLY": "4.99",
+    "billing.FLUTTERWAVE_PRICE_YEARLY": "39.99",
+    "billing.FLUTTERWAVE_CURRENCY": "USD",
+    "billing.FLUTTERWAVE_WEBHOOK_SECRET_HASH": "secret-hash",
+}
+
+
+def _patch_config():
+    # A single context manager patching every config value the module
+    # reads by name, rather than one `with` per value.
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    for target, value in _CONFIGURED.items():
+        stack.enter_context(patch(target, value))
+    return stack
 
 
 # ---- /create-checkout-session ----
 
 def test_missing_plan_raises_400():
-    with patch("billing.STRIPE_SECRET_KEY", "sk_test_fake"):
+    with _patch_config():
         with pytest.raises(HTTPException) as exc_info:
             create_checkout_session({}, CURRENT_USER)
         assert exc_info.value.status_code == 400
 
 
 def test_unknown_plan_raises_400():
-    with patch("billing.STRIPE_SECRET_KEY", "sk_test_fake"):
+    with _patch_config():
         with pytest.raises(HTTPException) as exc_info:
             create_checkout_session({"plan": "lifetime"}, CURRENT_USER)
         assert exc_info.value.status_code == 400
 
 
-def test_valid_plan_creates_a_session_scoped_to_the_current_user():
-    mock_session = MagicMock(url="https://checkout.stripe.com/pay/cs_test_123")
-    with patch("billing.STRIPE_SECRET_KEY", "sk_test_fake"), \
-         patch("billing.STRIPE_PRICE_MONTHLY", "price_monthly_fake"), \
-         patch("billing.stripe.checkout.Session.create", return_value=mock_session) as mock_create:
-        result = create_checkout_session({"plan": "monthly"}, CURRENT_USER)
-
-        assert result == {"checkout_url": mock_session.url}
-        kwargs = mock_create.call_args.kwargs
-        assert kwargs["client_reference_id"] == "user-1"
-        assert kwargs["mode"] == "subscription"
-        assert kwargs["line_items"] == [{"price": "price_monthly_fake", "quantity": 1}]
-
-
-def test_stripe_not_configured_raises_500():
-    with patch("billing.STRIPE_SECRET_KEY", None):
+def test_flutterwave_not_configured_raises_500():
+    with patch("billing.FLUTTERWAVE_SECRET_KEY", None):
         with pytest.raises(HTTPException) as exc_info:
             create_checkout_session({"plan": "monthly"}, CURRENT_USER)
         assert exc_info.value.status_code == 500
 
 
-def test_stripe_error_creating_session_raises_502():
-    with patch("billing.STRIPE_SECRET_KEY", "sk_test_fake"), \
-         patch("billing.STRIPE_PRICE_YEARLY", "price_yearly_fake"), \
-         patch("billing.stripe.checkout.Session.create", side_effect=Exception("boom")):
+def test_valid_plan_creates_a_checkout_scoped_to_the_current_user():
+    fake_response = _fake_response(200, {
+        "status": "success",
+        "data": {"link": "https://checkout.flutterwave.com/v3/hosted/pay/abc123"},
+    })
+    with _patch_config(), patch("billing.requests.post", return_value=fake_response) as mock_post:
+        result = create_checkout_session({"plan": "monthly"}, CURRENT_USER)
+
+        assert result == {"checkout_url": "https://checkout.flutterwave.com/v3/hosted/pay/abc123"}
+        kwargs = mock_post.call_args.kwargs
+        assert kwargs["json"]["payment_plan"] == "111"
+        assert kwargs["json"]["amount"] == "4.99"
+        assert kwargs["json"]["currency"] == "USD"
+        tx_ref = kwargs["json"]["tx_ref"]
+        assert tx_ref.startswith("ollie_monthly_user-1_")
+        assert kwargs["headers"]["Authorization"] == "Bearer flw_test_fake"
+
+
+def test_flutterwave_rejecting_the_request_raises_502():
+    fake_response = _fake_response(400, {"status": "error", "message": "invalid plan"})
+    with _patch_config(), patch("billing.requests.post", return_value=fake_response):
         with pytest.raises(HTTPException) as exc_info:
             create_checkout_session({"plan": "yearly"}, CURRENT_USER)
         assert exc_info.value.status_code == 502
 
 
+def test_network_error_creating_checkout_raises_502():
+    with _patch_config(), patch("billing.requests.post", side_effect=Exception("boom")):
+        with pytest.raises(HTTPException) as exc_info:
+            create_checkout_session({"plan": "monthly"}, CURRENT_USER)
+        assert exc_info.value.status_code == 502
+
+
 # ---- /webhook ----
 
-def test_invalid_signature_is_rejected():
-    with patch("billing.stripe.Webhook.construct_event", side_effect=Exception("bad sig")):
+def test_wrong_verif_hash_is_rejected():
+    with _patch_config():
         with pytest.raises(HTTPException) as exc_info:
-            _run_webhook(_fake_request(b"{}"))
+            _run_webhook(_fake_request({"event": "charge.completed"}, verif_hash="wrong"))
         assert exc_info.value.status_code == 400
 
 
-def test_checkout_completed_activates_premium_for_the_referenced_user():
-    event = {
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": "user-1", "subscription": "sub_123"}},
-    }
-    fake_subscription = {
-        "id": "sub_123",
-        "status": "active",
-        # current_period_end lives on the item, not the subscription
-        # itself, as of Stripe API version 2025-03-31.basil -- this
-        # fixture mirrors the real shape so a regression back to
-        # reading sub["current_period_end"] fails this test instead
-        # of only failing silently against real Stripe webhooks.
-        "items": {"data": [{"price": {"id": "price_monthly"}, "current_period_end": 1999999999}]},
-    }
-    with patch("billing.stripe.Webhook.construct_event", return_value=event), \
-         patch("billing.stripe.Subscription.retrieve", return_value=fake_subscription), \
-         patch("billing.STRIPE_PRICE_MONTHLY", "price_monthly"), \
+def test_missing_verif_hash_is_rejected():
+    with _patch_config():
+        with pytest.raises(HTTPException) as exc_info:
+            _run_webhook(_fake_request({"event": "charge.completed"}, verif_hash=""))
+        assert exc_info.value.status_code == 400
+
+
+def test_non_charge_event_is_ignored_without_verifying():
+    with _patch_config(), patch("billing.requests.get") as mock_get:
+        result = _run_webhook(_fake_request({"event": "subscription.cancelled", "data": {"id": 1}}))
+        assert result == {"received": True}
+        mock_get.assert_not_called()
+
+
+def test_charge_completed_activates_premium_after_independent_verification():
+    verify_response = _fake_response(200, {
+        "status": "success",
+        "data": {
+            "status": "successful",
+            "tx_ref": "ollie_monthly_user-1_abcdef",
+            "amount": 4.99,
+            "currency": "USD",
+        },
+    })
+    with _patch_config(), \
+         patch("billing.requests.get", return_value=verify_response) as mock_get, \
          patch("billing.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
             MagicMock(data=[])
 
-        result = _run_webhook(_fake_request(b"{}"))
+        result = _run_webhook(_fake_request({"event": "charge.completed", "data": {"id": 999}}))
 
         assert result == {"received": True}
+        # The webhook body's own fields are never trusted directly --
+        # activation only happens off the re-fetched verify response.
+        mock_get.assert_called_once()
+        assert "999" in mock_get.call_args.args[0]
         inserted = mock_supabase.table.return_value.insert.call_args[0][0]
         assert inserted["user_id"] == "user-1"
-        assert inserted["source"] == "stripe"
-        assert inserted["purchase_token"] == "sub_123"
+        assert inserted["source"] == "flutterwave"
         assert inserted["product_id"] == "ollie_premium_monthly_web"
-        assert inserted["expiry_time_millis"] == 1999999999000
         assert inserted["status"] == "active"
 
 
-def test_checkout_completed_without_a_subscription_is_ignored():
-    # Not every Checkout Session is for a subscription -- nothing to
-    # activate without one, and no client_reference_id/subscription
-    # id pair to look anything up by.
-    event = {
-        "type": "checkout.session.completed",
-        "data": {"object": {"client_reference_id": "user-1", "subscription": None}},
-    }
-    with patch("billing.stripe.Webhook.construct_event", return_value=event), \
-         patch("billing.stripe.Subscription.retrieve") as mock_retrieve:
-        result = _run_webhook(_fake_request(b"{}"))
-        assert result == {"received": True}
-        mock_retrieve.assert_not_called()
-
-
-def test_subscription_updated_syncs_the_existing_row_by_purchase_token():
-    event = {
-        "type": "customer.subscription.updated",
-        "data": {"object": {
-            "id": "sub_123", "status": "active",
-            "items": {"data": [{"price": {"id": "price_yearly"}, "current_period_end": 1999999999}]},
-        }},
-    }
-    with patch("billing.stripe.Webhook.construct_event", return_value=event), \
-         patch("billing.supabase") as mock_supabase:
-        mock_supabase.table.return_value.select.return_value.eq.side_effect = [
-            MagicMock(execute=MagicMock(return_value=MagicMock(data=[{"user_id": "user-1"}]))),
-            MagicMock(execute=MagicMock(return_value=MagicMock(data=[{"id": "sub-row-1"}]))),
-        ]
-
-        result = _run_webhook(_fake_request(b"{}"))
-
-        assert result == {"received": True}
-        mock_supabase.table.return_value.update.assert_called_once()
-        updated = mock_supabase.table.return_value.update.call_args[0][0]
-        assert updated["status"] == "active"
-        assert updated["source"] == "stripe"
-
-
-def test_subscription_deleted_marks_the_row_expired():
-    event = {
-        "type": "customer.subscription.deleted",
-        "data": {"object": {
-            "id": "sub_123", "status": "canceled",
-            "items": {"data": [{"price": {"id": "price_yearly"}, "current_period_end": 1999999999}]},
-        }},
-    }
-    with patch("billing.stripe.Webhook.construct_event", return_value=event), \
-         patch("billing.supabase") as mock_supabase:
-        mock_supabase.table.return_value.select.return_value.eq.side_effect = [
-            MagicMock(execute=MagicMock(return_value=MagicMock(data=[{"user_id": "user-1"}]))),
-            MagicMock(execute=MagicMock(return_value=MagicMock(data=[{"id": "sub-row-1"}]))),
-        ]
-
-        _run_webhook(_fake_request(b"{}"))
-
-        updated = mock_supabase.table.return_value.update.call_args[0][0]
-        assert updated["status"] == "expired"
-
-
-def test_subscription_event_for_unknown_subscription_is_ignored():
-    event = {
-        "type": "customer.subscription.updated",
-        "data": {"object": {
-            "id": "sub_unknown", "status": "active",
-            "items": {"data": [{"price": {"id": "price_yearly"}, "current_period_end": 1999999999}]},
-        }},
-    }
-    with patch("billing.stripe.Webhook.construct_event", return_value=event), \
+def test_charge_completed_updates_an_existing_row():
+    verify_response = _fake_response(200, {
+        "status": "success",
+        "data": {
+            "status": "successful",
+            "tx_ref": "ollie_yearly_user-1_abcdef",
+            "amount": 39.99,
+            "currency": "USD",
+        },
+    })
+    with _patch_config(), \
+         patch("billing.requests.get", return_value=verify_response), \
          patch("billing.supabase") as mock_supabase:
         mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
-            MagicMock(data=[])
+            MagicMock(data=[{"id": "sub-row-1"}])
 
-        result = _run_webhook(_fake_request(b"{}"))
+        _run_webhook(_fake_request({"event": "charge.completed", "data": {"id": 1000}}))
 
-        assert result == {"received": True}
+        mock_supabase.table.return_value.update.assert_called_once()
+        mock_supabase.table.return_value.update.return_value.eq.assert_called_once_with("id", "sub-row-1")
+
+
+def test_verification_failure_does_not_activate_anything():
+    with _patch_config(), \
+         patch("billing.requests.get", return_value=_fake_response(200, {"status": "error"})), \
+         patch("billing.supabase") as mock_supabase:
+        _run_webhook(_fake_request({"event": "charge.completed", "data": {"id": 1}}))
+        mock_supabase.table.return_value.insert.assert_not_called()
         mock_supabase.table.return_value.update.assert_not_called()
+
+
+def test_verified_but_not_successful_status_does_not_activate():
+    verify_response = _fake_response(200, {
+        "status": "success",
+        "data": {"status": "pending", "tx_ref": "ollie_monthly_user-1_x", "amount": 4.99, "currency": "USD"},
+    })
+    with _patch_config(), \
+         patch("billing.requests.get", return_value=verify_response), \
+         patch("billing.supabase") as mock_supabase:
+        _run_webhook(_fake_request({"event": "charge.completed", "data": {"id": 1}}))
+        mock_supabase.table.return_value.insert.assert_not_called()
+
+
+def test_amount_below_expected_price_does_not_activate():
+    # A forged/replayed webhook pointing at a cheaper genuine
+    # transaction id shouldn't be able to grant premium for less
+    # than what the plan actually costs.
+    verify_response = _fake_response(200, {
+        "status": "success",
+        "data": {"status": "successful", "tx_ref": "ollie_monthly_user-1_x", "amount": 0.50, "currency": "USD"},
+    })
+    with _patch_config(), \
+         patch("billing.requests.get", return_value=verify_response), \
+         patch("billing.supabase") as mock_supabase:
+        _run_webhook(_fake_request({"event": "charge.completed", "data": {"id": 1}}))
+        mock_supabase.table.return_value.insert.assert_not_called()
+
+
+def test_currency_mismatch_does_not_activate():
+    verify_response = _fake_response(200, {
+        "status": "success",
+        "data": {"status": "successful", "tx_ref": "ollie_monthly_user-1_x", "amount": 4.99, "currency": "RWF"},
+    })
+    with _patch_config(), \
+         patch("billing.requests.get", return_value=verify_response), \
+         patch("billing.supabase") as mock_supabase:
+        _run_webhook(_fake_request({"event": "charge.completed", "data": {"id": 1}}))
+        mock_supabase.table.return_value.insert.assert_not_called()
+
+
+def test_malformed_tx_ref_does_not_activate():
+    verify_response = _fake_response(200, {
+        "status": "success",
+        "data": {"status": "successful", "tx_ref": "not-ours-at-all", "amount": 4.99, "currency": "USD"},
+    })
+    with _patch_config(), \
+         patch("billing.requests.get", return_value=verify_response), \
+         patch("billing.supabase") as mock_supabase:
+        _run_webhook(_fake_request({"event": "charge.completed", "data": {"id": 1}}))
         mock_supabase.table.return_value.insert.assert_not_called()

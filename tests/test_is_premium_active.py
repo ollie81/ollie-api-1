@@ -74,17 +74,20 @@ def test_expired_locally_but_play_confirms_still_active_renewed():
         mock_supabase.table.return_value.update.assert_called()
 
 
-def test_expired_stripe_subscription_is_not_premium_and_never_calls_play():
-    # Stripe rows (see billing.py) have no Play purchase to re-verify
-    # -- Stripe's own webhook keeps expiry_time_millis current, so a
-    # locally-expired one is trusted as genuinely expired, with no
-    # _get_play_service call attempted at all.
+def test_expired_web_subscription_is_not_premium_and_never_calls_play():
+    # A web-purchased row (source="flutterwave", see billing.py) has
+    # no Play purchase to re-verify against -- its own webhook keeps
+    # expiry_time_millis current, so a locally-expired one is trusted
+    # as genuinely expired, with no _get_play_service call attempted
+    # at all. The branch in is_premium_active checks for *any*
+    # non-"play" source, not specifically "flutterwave" -- this value
+    # is just today's real example of one.
     with patch("premium.supabase") as mock_supabase, \
          patch("premium._get_play_service") as mock_get_service:
         _patch_subscription_row(mock_supabase, {
             "id": "sub-1", "status": "active", "expiry_time_millis": 1000,
-            "product_id": "ollie_premium_monthly_web", "purchase_token": "sub_stripe_1",
-            "source": "stripe",
+            "product_id": "ollie_premium_monthly_web", "purchase_token": "flw_txn_1",
+            "source": "flutterwave",
         })
 
         assert is_premium_active("user-1") is False

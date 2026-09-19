@@ -1,154 +1,213 @@
 # ============================================================
-# BILLING — Stripe checkout for premium, web-client only. The
-# Android app pays through Google Play Billing (see premium.py);
-# the web has no app-store equivalent, so it buys a subscription
-# through Stripe Checkout instead. Both paths land in the same
-# `subscriptions` table and are read by the same
-# premium.is_premium_active — this only ever WRITES rows tagged
-# source="stripe", so that function's Play re-verification branch
-# never touches them.
+# BILLING — Flutterwave checkout for premium, web-client only. The
+# Android app pays through Google Play Billing (see premium.py); the
+# web has no app-store equivalent, and Stripe doesn't support Rwanda
+# as a merchant country, so this uses Flutterwave instead (licensed
+# by the National Bank of Rwanda, accepts international cards from
+# anywhere plus MTN/Airtel Mobile Money locally). Both paths land in
+# the same `subscriptions` table read by premium.is_premium_active —
+# this only ever WRITES rows tagged source="flutterwave", so that
+# function's Play re-verification branch never touches them.
+#
+# Uses Flutterwave's v3 REST API directly via `requests` rather than
+# a third-party SDK wrapper -- there's no official Python SDK, and a
+# handful of plain HTTP calls against a documented REST API is easier
+# to verify correct than trusting an unofficial one.
+#
+# Trust model: Flutterwave's webhook signature (the verif-hash header)
+# is a static value you configure -- NOT an HMAC over the payload, so
+# matching it only proves *a* request came from someone who knows
+# your secret hash, not that THIS payload's contents are genuine.
+# Flutterwave's own docs say as much: "always re-query our API to
+# verify the transaction details" before granting anything. So the
+# webhook here only extracts a transaction id and immediately re-fetches
+# the authoritative status from Flutterwave's own Verify Transaction
+# endpoint -- premium is only ever granted based on that response, and
+# the tx_ref/amount are cross-checked there too, not trusted from the
+# webhook body.
 #
 # SETUP REQUIRED before this works:
-#   1. Create a Stripe account, then in the Dashboard create two
-#      recurring Prices (monthly, yearly) under a "Ollie Premium"
-#      product.
-#   2. Set env vars STRIPE_SECRET_KEY, STRIPE_PRICE_MONTHLY,
-#      STRIPE_PRICE_YEARLY, and WEB_APP_URL (the deployed web app's
-#      origin, e.g. https://ollie-web.vercel.app).
-#   3. In the Stripe Dashboard, add a webhook endpoint pointing at
-#      <this API's base url>/billing/webhook, subscribed to
-#      checkout.session.completed, customer.subscription.updated,
-#      and customer.subscription.deleted. Set STRIPE_WEBHOOK_SECRET
-#      to the signing secret it gives you.
+#   1. Create a Flutterwave account for Rwanda (business registration
+#      is required for Rwandan merchants) and get it enabled for
+#      international card payments (Dashboard request, ~48h review).
+#   2. Create two Payment Plans (Dashboard, or POST
+#      /v3/payment-plans) -- monthly and yearly -- and note their
+#      numeric plan ids.
+#   3. Set env vars FLUTTERWAVE_SECRET_KEY, FLUTTERWAVE_PLAN_MONTHLY,
+#      FLUTTERWAVE_PLAN_YEARLY, FLUTTERWAVE_PRICE_MONTHLY,
+#      FLUTTERWAVE_PRICE_YEARLY (amounts, matching what each plan was
+#      created with), FLUTTERWAVE_CURRENCY (defaults to USD), and
+#      WEB_APP_URL (the deployed web app's origin).
+#   4. In the Flutterwave Dashboard, under Settings > Webhooks, set
+#      a secret hash and point the webhook URL at
+#      <this API's base url>/billing/webhook. Set
+#      FLUTTERWAVE_WEBHOOK_SECRET_HASH to that same secret hash.
 # ============================================================
 
 import logging
+import secrets
+from datetime import datetime, timezone
 
-import stripe
+import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth import get_current_user
 from config import (
-    STRIPE_SECRET_KEY,
-    STRIPE_WEBHOOK_SECRET,
-    STRIPE_PRICE_MONTHLY,
-    STRIPE_PRICE_YEARLY,
+    FLUTTERWAVE_SECRET_KEY,
+    FLUTTERWAVE_WEBHOOK_SECRET_HASH,
+    FLUTTERWAVE_PLAN_MONTHLY,
+    FLUTTERWAVE_PLAN_YEARLY,
+    FLUTTERWAVE_PRICE_MONTHLY,
+    FLUTTERWAVE_PRICE_YEARLY,
+    FLUTTERWAVE_CURRENCY,
     WEB_APP_URL,
 )
 from database import supabase
 
 logger = logging.getLogger("ollie.billing")
 router = APIRouter()
-stripe.api_key = STRIPE_SECRET_KEY
 
-# These two build their dict fresh on every call rather than once
-# at import time -- STRIPE_PRICE_MONTHLY/YEARLY are read from env at
-# process startup (see config.py), so a dict frozen at import time
-# would be fine in production, but the two are easy to confuse and
-# freezing them cost nothing to avoid.
+API_BASE = "https://api.flutterwave.com/v3"
+REQUEST_TIMEOUT_SECONDS = 15
+# tx_ref is entirely self-generated (Flutterwave just requires it to
+# be unique), so the user id and plan are encoded directly into it --
+# this is what lets the webhook/verify round-trip recover who to
+# activate premium for. Supabase user ids are UUIDs (hyphens, no
+# underscores), so splitting on "_" is unambiguous.
+_TX_REF_PREFIX = "ollie"
 
-def _price_id_for_plan(plan):
-    return {"monthly": STRIPE_PRICE_MONTHLY, "yearly": STRIPE_PRICE_YEARLY}.get(plan)
+
+def _auth_headers():
+    return {"Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}"}
 
 
-def _product_id_for_price(price_id):
+def _plan_id_for(plan):
+    return {"monthly": FLUTTERWAVE_PLAN_MONTHLY, "yearly": FLUTTERWAVE_PLAN_YEARLY}.get(plan)
+
+
+def _price_for(plan):
+    return {"monthly": FLUTTERWAVE_PRICE_MONTHLY, "yearly": FLUTTERWAVE_PRICE_YEARLY}.get(plan)
+
+
+def _product_id_for(plan):
     # Mirrors the Play product ids in purchase_service.dart/config.py,
     # just tagged "_web" -- premium.py's is_premium_active never
     # inspects product_id itself (source is what it branches on), so
     # this is only ever surfaced back to the client for display.
-    return {
-        STRIPE_PRICE_MONTHLY: "ollie_premium_monthly_web",
-        STRIPE_PRICE_YEARLY: "ollie_premium_yearly_web",
-    }.get(price_id, price_id)
+    return f"ollie_premium_{plan}_web"
 
 
 @router.post("/create-checkout-session")
 def create_checkout_session(data: dict, current_user: dict = Depends(get_current_user)):
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=500, detail="Stripe is not configured")
+    if not FLUTTERWAVE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Flutterwave is not configured")
 
-    price_id = _price_id_for_plan(data.get("plan"))
-    if not price_id:
+    plan = data.get("plan")
+    plan_id = _plan_id_for(plan)
+    price = _price_for(plan)
+    if not plan_id or not price:
         raise HTTPException(status_code=400, detail="plan must be 'monthly' or 'yearly'")
 
+    tx_ref = f"{_TX_REF_PREFIX}_{plan}_{current_user['id']}_{secrets.token_hex(6)}"
+    email = current_user.get("email") or current_user.get("phone") or f"{current_user['id']}@ollie.invalid"
+
     try:
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            line_items=[{"price": price_id, "quantity": 1}],
-            # Lets the webhook (which only ever sees Stripe's own ids)
-            # tie the completed checkout back to our user.
-            client_reference_id=current_user["id"],
-            success_url=f"{WEB_APP_URL}/premium/success",
-            cancel_url=f"{WEB_APP_URL}/premium",
+        response = requests.post(
+            f"{API_BASE}/payments",
+            headers=_auth_headers(),
+            json={
+                "tx_ref": tx_ref,
+                "amount": price,
+                "currency": FLUTTERWAVE_CURRENCY,
+                "redirect_url": f"{WEB_APP_URL}/premium/success",
+                "payment_plan": plan_id,
+                "customer": {"email": email},
+                "customizations": {"title": "Ollie Premium"},
+            },
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
+        body = response.json()
     except Exception as e:
-        logger.error(f"Stripe checkout session creation failed for user {current_user['id']}: {e}")
+        logger.error(f"Flutterwave checkout creation failed for user {current_user['id']}: {e}")
         raise HTTPException(status_code=502, detail="Could not start checkout")
 
-    return {"checkout_url": session.url}
+    if response.status_code != 200 or body.get("status") != "success":
+        logger.error(f"Flutterwave checkout creation rejected for user {current_user['id']}: {body}")
+        raise HTTPException(status_code=502, detail="Could not start checkout")
+
+    return {"checkout_url": body["data"]["link"]}
 
 
 @router.post("/webhook")
-async def stripe_webhook(request: Request):
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature", "")
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except Exception as e:
-        logger.warning(f"Stripe webhook signature check failed: {e}")
+async def flutterwave_webhook(request: Request):
+    # See the trust-model note at the top of this file -- this header
+    # check alone is NOT sufficient proof of authenticity, only a
+    # first-pass filter before the real verification below.
+    if not FLUTTERWAVE_WEBHOOK_SECRET_HASH or request.headers.get("verif-hash") != FLUTTERWAVE_WEBHOOK_SECRET_HASH:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    event_type = event["type"]
-    obj = event["data"]["object"]
-
-    if event_type == "checkout.session.completed":
-        _activate_from_checkout(obj)
-    elif event_type in ("customer.subscription.updated", "customer.subscription.deleted"):
-        _sync_from_subscription(obj["id"], obj)
+    body = await request.json()
+    if body.get("event") == "charge.completed":
+        transaction_id = body.get("data", {}).get("id")
+        if transaction_id:
+            _activate_from_transaction(transaction_id)
 
     return {"received": True}
 
 
-def _activate_from_checkout(session: dict):
-    user_id = session.get("client_reference_id")
-    subscription_id = session.get("subscription")
-    if not user_id or not subscription_id:
-        # Not a subscription checkout, or missing the reference we
-        # need -- nothing we can activate.
+def _verify_transaction(transaction_id) -> dict | None:
+    try:
+        response = requests.get(
+            f"{API_BASE}/transactions/{transaction_id}/verify",
+            headers=_auth_headers(),
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        body = response.json()
+    except Exception as e:
+        logger.error(f"Flutterwave transaction verification failed for {transaction_id}: {e}")
+        return None
+
+    if response.status_code != 200 or body.get("status") != "success":
+        return None
+    return body.get("data")
+
+
+def _activate_from_transaction(transaction_id):
+    verified = _verify_transaction(transaction_id)
+    if not verified or verified.get("status") != "successful":
         return
-    sub = stripe.Subscription.retrieve(subscription_id)
-    _upsert_subscription(user_id, sub)
 
-
-def _sync_from_subscription(subscription_id: str, sub: dict):
-    # Renewal/cancellation events carry no client_reference_id (that
-    # only exists on the original Checkout Session) -- recover the
-    # user from the row this same subscription id activated earlier.
-    existing = supabase.table("subscriptions").select("user_id") \
-        .eq("purchase_token", subscription_id).execute()
-    if not existing.data:
-        logger.warning(f"Stripe webhook for unknown subscription {subscription_id}")
+    parts = (verified.get("tx_ref") or "").split("_")
+    if len(parts) < 4 or parts[0] != _TX_REF_PREFIX:
+        logger.warning(f"Flutterwave transaction {transaction_id} has an unrecognized tx_ref")
         return
-    _upsert_subscription(existing.data[0]["user_id"], sub)
+    plan, user_id = parts[1], parts[2]
 
+    expected_price = _price_for(plan)
+    charged = verified.get("amount")
+    if expected_price is None or charged is None or float(charged) < float(expected_price):
+        logger.warning(f"Flutterwave transaction {transaction_id} amount/plan mismatch, refusing to activate")
+        return
+    if verified.get("currency") != FLUTTERWAVE_CURRENCY:
+        logger.warning(f"Flutterwave transaction {transaction_id} currency mismatch, refusing to activate")
+        return
 
-def _upsert_subscription(user_id: str, sub):
-    status = "active" if sub["status"] in ("active", "trialing") else "expired"
-    # current_period_end moved from the Subscription object onto its
-    # first item as of Stripe API version 2025-03-31.basil -- reading
-    # it off `sub` directly (as older Stripe docs/examples still show)
-    # raises KeyError on every webhook delivery under the SDK version
-    # this project is on, which Stripe treats as a failed delivery
-    # and retries, then gives up -- silently never activating premium
-    # for a customer who already paid.
-    item = sub["items"]["data"][0]
+    # Payment Plans don't hand back a "current period end" the way a
+    # Stripe subscription does -- Flutterwave just auto-charges again
+    # on the plan's interval and fires a fresh charge.completed each
+    # time. Granting roughly one interval from now (rather than from
+    # the plan's own clock) means a late-arriving webhook still gives
+    # the user the full period they paid for.
+    interval_days = 366 if plan == "yearly" else 31
+    expiry_ms = _now_ms() + interval_days * 24 * 60 * 60 * 1000
+
     sub_data = {
         "user_id": user_id,
-        "status": status,
-        "purchase_token": sub["id"],
-        "product_id": _product_id_for_price(item["price"]["id"]),
-        "expiry_time_millis": int(item["current_period_end"]) * 1000,
-        "source": "stripe",
+        "status": "active",
+        "purchase_token": str(transaction_id),
+        "product_id": _product_id_for(plan),
+        "expiry_time_millis": expiry_ms,
+        "source": "flutterwave",
     }
 
     existing = supabase.table("subscriptions").select("id").eq("user_id", user_id).execute()
@@ -156,3 +215,7 @@ def _upsert_subscription(user_id: str, sub):
         supabase.table("subscriptions").update(sub_data).eq("id", existing.data[0]["id"]).execute()
     else:
         supabase.table("subscriptions").insert(sub_data).execute()
+
+
+def _now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)

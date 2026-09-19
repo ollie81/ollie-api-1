@@ -84,4 +84,3 @@ slowapi
 apscheduler
 twilio
 python-multipart
-stripe
