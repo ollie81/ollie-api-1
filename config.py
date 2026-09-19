@@ -53,6 +53,17 @@ PLAY_MONTHLY_PRODUCT_ID = os.getenv("PLAY_MONTHLY_PRODUCT_ID", "ollie_premium_mo
 PLAY_LIFETIME_PRODUCT_ID = os.getenv("PLAY_LIFETIME_PRODUCT_ID", "ollie_premium_lifetime")
 
 # ============================================================
+# WEB APP — the web client has no app-store equivalent to Google
+# Play Billing, so it needs its own payment processor for premium
+# (not yet chosen -- Stripe doesn't support Rwanda as a merchant
+# country, and Flutterwave requires business registration, which
+# isn't available yet either). WEB_APP_URL is still needed as the
+# origin CORS/redirect-back settings key off, independent of that.
+# ============================================================
+
+WEB_APP_URL = os.getenv("WEB_APP_URL", "http://localhost:5173")
+
+# ============================================================
 # CORS
 # ============================================================
 

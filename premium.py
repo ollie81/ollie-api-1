@@ -81,6 +81,14 @@ def is_premium_active(user_id: str) -> bool:
     if expiry_ms <= 0 or now_ms < expiry_ms:
         return True
 
+    # Any non-Play source (the web premium purchase path, whatever
+    # processor it ends up using) has no Play purchase to re-verify
+    # against, and won't need one -- its own webhook is expected to
+    # keep expiry_time_millis current on every renewal, so a
+    # locally-expired one really is expired.
+    if sub.get("source", "play") != "play":
+        return False
+
     # Locally stored expiry has passed. That could mean the sub
     # genuinely ended, or it auto-renewed on Google's side and we
     # never heard about it (no Real-time Developer Notifications
