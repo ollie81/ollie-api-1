@@ -96,6 +96,15 @@ def get_usage(current_user: dict = Depends(get_current_user)):
             "country": current_user.get("country"),
             "region": current_user.get("region"),
             "district": current_user.get("district"),
+            # `phone` holds a real phone number for SMS signups, or an
+            # email string for Google/email signups (see auth.py's
+            # google_login/email routes, which key by "phone" either
+            # way) -- the web client only ever creates the latter kind
+            # of account, so this is always an email there. Included so
+            # Settings has something to show in Account without a
+            # separate profile endpoint.
+            "email": current_user.get("phone"),
+            "username": current_user.get("username"),
         }
     except Exception as e:
         logger.error(f"get_usage failed for user {current_user.get('id')}: {e}")
