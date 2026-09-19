@@ -13,6 +13,7 @@
 # /speak-side estimator) is tested separately below.
 # ============================================================
 
+from datetime import date
 from unittest.mock import patch, MagicMock
 
 from database import OllieDB, TRIAL_VOICE_SECONDS_LIMIT, ESTIMATED_CHARS_PER_SECOND, estimate_speech_seconds
@@ -98,6 +99,75 @@ def test_exhausts_retries_and_fails_closed_under_perpetual_contention():
         _update_chain(mock_supabase).return_value = _result([])  # always loses
 
         assert OllieDB().try_consume_voice_trial("user-1", 1) is False
+        assert _update_chain(mock_supabase).call_count == 5
+
+
+# ============================================================
+# try_consume_voice_exchange_today -- the web client's separate
+# once-per-day voice model (see migration 019 and chat.py's
+# /chat/voice include_audio=True path). Independent of the
+# lifetime-seconds trial above; same optimistic-concurrency shape.
+# ============================================================
+
+TODAY = date.today().isoformat()
+
+
+def test_fresh_user_can_claim_todays_exchange():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({"voice_trial_date": "1970-01-01"})
+        _update_chain(mock_supabase).return_value = _result([{"voice_trial_date": TODAY}])
+
+        assert OllieDB().try_consume_voice_exchange_today("user-1") is True
+
+
+def test_missing_field_is_treated_as_never_used():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({})  # no voice_trial_date key at all
+        _update_chain(mock_supabase).return_value = _result([{}])
+
+        assert OllieDB().try_consume_voice_exchange_today("user-1") is True
+
+
+def test_claim_writes_todays_date_exactly():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({"voice_trial_date": "1970-01-01"})
+        _update_chain(mock_supabase).return_value = _result([{}])
+
+        OllieDB().try_consume_voice_exchange_today("user-1")
+
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["voice_trial_date"] == TODAY
+
+
+def test_already_used_today_is_rejected_without_writing():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({"voice_trial_date": TODAY})
+
+        assert OllieDB().try_consume_voice_exchange_today("user-1") is False
+        mock_supabase.table.return_value.update.assert_not_called()
+
+
+def test_exchange_concurrent_collision_retries_against_fresh_value_and_succeeds():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).side_effect = [
+            _result({"voice_trial_date": "1970-01-01"}),
+            _result({"voice_trial_date": "2020-06-01"}),  # someone else claimed a stale day under us
+        ]
+        _update_chain(mock_supabase).side_effect = [
+            _result([]),      # lost the race
+            _result([{}]),    # won on retry
+        ]
+
+        assert OllieDB().try_consume_voice_exchange_today("user-1") is True
+        assert _update_chain(mock_supabase).call_count == 2
+
+
+def test_exchange_exhausts_retries_and_fails_closed_under_perpetual_contention():
+    with patch("database.supabase") as mock_supabase:
+        _select_chain(mock_supabase).return_value = _result({"voice_trial_date": "1970-01-01"})
+        _update_chain(mock_supabase).return_value = _result([])  # always loses
+
+        assert OllieDB().try_consume_voice_exchange_today("user-1") is False
         assert _update_chain(mock_supabase).call_count == 5
 
 

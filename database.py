@@ -660,6 +660,56 @@ class OllieDB:
         # rather than risk over-granting.
         return False
 
+    def try_consume_voice_exchange_today(self, user_id: str) -> bool:
+        """
+        One full voice exchange (hear the user, speak Ollie's reply)
+        per free user per calendar day -- the web client's voice
+        trial model (see chat.py's /chat/voice, include_audio=True
+        path). Independent of try_consume_voice_trial's lifetime
+        seconds budget above, which the Android app's separate
+        /speak-based flow keeps using unchanged.
+
+        A single exchange needs a Whisper call AND a TTS call, but
+        must only ever cost one charge -- checking the day twice
+        (once per call) would let the first call use up the day and
+        then block Ollie's own reply from speaking. So this is
+        charged exactly once, by the /chat/voice route itself, which
+        does both in one request.
+
+        Uses the server's own calendar day (date.today()), same
+        convention as try_consume_message's daily reset -- not the
+        caller's local day.
+
+        Same optimistic-concurrency shape as try_consume_message:
+        only claims today if voice_trial_date still reads exactly
+        what was just fetched, so two concurrent taps can't both pass.
+        """
+        today = date.today().isoformat()
+
+        for _ in range(5):
+            result = self.supabase.table("users") \
+                .select("voice_trial_date") \
+                .eq("id", user_id) \
+                .single() \
+                .execute()
+            last_used = (result.data or {}).get("voice_trial_date") or "1970-01-01"
+
+            if last_used == today:
+                return False
+
+            update_result = self.supabase.table("users") \
+                .update({"voice_trial_date": today}) \
+                .eq("id", user_id) \
+                .eq("voice_trial_date", last_used) \
+                .execute()
+            if update_result.data:
+                return True
+            # else: someone else claimed today's exchange under us -- retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
+
     def get_voice_trial_remaining(self, user_id: str) -> int:
         """
         Read-only -- no race-condition concern like try_consume_voice_trial
