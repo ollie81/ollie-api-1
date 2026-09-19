@@ -100,8 +100,12 @@ def test_checkout_completed_activates_premium_for_the_referenced_user():
     fake_subscription = {
         "id": "sub_123",
         "status": "active",
-        "items": {"data": [{"price": {"id": "price_monthly"}}]},
-        "current_period_end": 1999999999,
+        # current_period_end lives on the item, not the subscription
+        # itself, as of Stripe API version 2025-03-31.basil -- this
+        # fixture mirrors the real shape so a regression back to
+        # reading sub["current_period_end"] fails this test instead
+        # of only failing silently against real Stripe webhooks.
+        "items": {"data": [{"price": {"id": "price_monthly"}, "current_period_end": 1999999999}]},
     }
     with patch("billing.stripe.Webhook.construct_event", return_value=event), \
          patch("billing.stripe.Subscription.retrieve", return_value=fake_subscription), \
@@ -142,8 +146,7 @@ def test_subscription_updated_syncs_the_existing_row_by_purchase_token():
         "type": "customer.subscription.updated",
         "data": {"object": {
             "id": "sub_123", "status": "active",
-            "items": {"data": [{"price": {"id": "price_yearly"}}]},
-            "current_period_end": 1999999999,
+            "items": {"data": [{"price": {"id": "price_yearly"}, "current_period_end": 1999999999}]},
         }},
     }
     with patch("billing.stripe.Webhook.construct_event", return_value=event), \
@@ -167,8 +170,7 @@ def test_subscription_deleted_marks_the_row_expired():
         "type": "customer.subscription.deleted",
         "data": {"object": {
             "id": "sub_123", "status": "canceled",
-            "items": {"data": [{"price": {"id": "price_yearly"}}]},
-            "current_period_end": 1999999999,
+            "items": {"data": [{"price": {"id": "price_yearly"}, "current_period_end": 1999999999}]},
         }},
     }
     with patch("billing.stripe.Webhook.construct_event", return_value=event), \
@@ -189,8 +191,7 @@ def test_subscription_event_for_unknown_subscription_is_ignored():
         "type": "customer.subscription.updated",
         "data": {"object": {
             "id": "sub_unknown", "status": "active",
-            "items": {"data": [{"price": {"id": "price_yearly"}}]},
-            "current_period_end": 1999999999,
+            "items": {"data": [{"price": {"id": "price_yearly"}, "current_period_end": 1999999999}]},
         }},
     }
     with patch("billing.stripe.Webhook.construct_event", return_value=event), \

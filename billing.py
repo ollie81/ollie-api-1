@@ -134,13 +134,20 @@ def _sync_from_subscription(subscription_id: str, sub: dict):
 
 def _upsert_subscription(user_id: str, sub):
     status = "active" if sub["status"] in ("active", "trialing") else "expired"
-    price_id = sub["items"]["data"][0]["price"]["id"]
+    # current_period_end moved from the Subscription object onto its
+    # first item as of Stripe API version 2025-03-31.basil -- reading
+    # it off `sub` directly (as older Stripe docs/examples still show)
+    # raises KeyError on every webhook delivery under the SDK version
+    # this project is on, which Stripe treats as a failed delivery
+    # and retries, then gives up -- silently never activating premium
+    # for a customer who already paid.
+    item = sub["items"]["data"][0]
     sub_data = {
         "user_id": user_id,
         "status": status,
         "purchase_token": sub["id"],
-        "product_id": _product_id_for_price(price_id),
-        "expiry_time_millis": int(sub["current_period_end"]) * 1000,
+        "product_id": _product_id_for_price(item["price"]["id"]),
+        "expiry_time_millis": int(item["current_period_end"]) * 1000,
         "source": "stripe",
     }
 
