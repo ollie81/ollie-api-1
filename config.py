@@ -53,14 +53,34 @@ PLAY_MONTHLY_PRODUCT_ID = os.getenv("PLAY_MONTHLY_PRODUCT_ID", "ollie_premium_mo
 PLAY_LIFETIME_PRODUCT_ID = os.getenv("PLAY_LIFETIME_PRODUCT_ID", "ollie_premium_lifetime")
 
 # ============================================================
-# WEB APP — the web client has no app-store equivalent to Google
-# Play Billing, so it needs its own payment processor for premium
-# (not yet chosen -- Stripe doesn't support Rwanda as a merchant
-# country, and Flutterwave requires business registration, which
-# isn't available yet either). WEB_APP_URL is still needed as the
-# origin CORS/redirect-back settings key off, independent of that.
+# LEMON SQUEEZY (web premium purchases) — the web client has no
+# app-store equivalent to Google Play Billing, so it buys premium
+# through Lemon Squeezy instead (see billing.py). Stripe doesn't
+# support Rwanda as a merchant country, and Flutterwave requires
+# business registration that isn't available -- Lemon Squeezy is a
+# Merchant of Record (it's the legal seller, not us), which is what
+# lets an individual sell here without registering a business, and
+# it confirmed Rwanda for payouts. Optional, same no-op-if-unset
+# pattern as the other third-party keys here: absent just means
+# /billing/create-checkout-session 500s until set.
 # ============================================================
 
+LEMONSQUEEZY_API_KEY = os.getenv("LEMONSQUEEZY_API_KEY")
+LEMONSQUEEZY_STORE_ID = os.getenv("LEMONSQUEEZY_STORE_ID")
+# Variant ids for the monthly/yearly subscription products -- create
+# these in the Lemon Squeezy dashboard first (Products > New Product,
+# with two variants) -- see billing.py for the full setup steps.
+LEMONSQUEEZY_VARIANT_MONTHLY = os.getenv("LEMONSQUEEZY_VARIANT_MONTHLY")
+LEMONSQUEEZY_VARIANT_YEARLY = os.getenv("LEMONSQUEEZY_VARIANT_YEARLY")
+LEMONSQUEEZY_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET")
+
+# ============================================================
+# WEB APP
+# ============================================================
+
+# Where Lemon Squeezy's hosted checkout sends the browser back to
+# after payment, and whatever else ends up keying off the web app's
+# own origin (CORS, etc).
 WEB_APP_URL = os.getenv("WEB_APP_URL", "http://localhost:5173")
 
 # ============================================================
