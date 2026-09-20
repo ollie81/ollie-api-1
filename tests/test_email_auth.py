@@ -305,6 +305,22 @@ def test_forgot_password_for_unknown_email_is_404():
         mock_send.assert_not_called()
 
 
+def test_forgot_password_for_a_google_account_says_so_instead_of_not_found():
+    # Same identity split as test_request_otp_rejects_email_already_used_for_google_signin:
+    # a Google account's email lives in `phone`, not `email`, so the
+    # first lookup comes back empty even though the account is real.
+    with patch("auth.supabase") as mock_supabase, patch("auth.send_otp_email") as mock_send:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
+            _mock_result([]),               # not found by email
+            _mock_result([{"id": "user-1"}]),  # found by phone -- a Google account
+        ]
+        with pytest.raises(HTTPException) as exc_info:
+            email_forgot_password(EmailForgotRequest(email="google-user@example.com"), _fake_request())
+        assert exc_info.value.status_code == 400
+        assert "Google" in exc_info.value.detail
+        mock_send.assert_not_called()
+
+
 def test_reset_with_correct_code_updates_password_and_kills_sessions():
     future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     with patch("auth.supabase") as mock_supabase:
