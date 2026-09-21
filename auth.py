@@ -60,6 +60,7 @@ class SignupRequest(BaseModel):
     password: str
     otp: str
     date_of_birth: str | None = None  # "YYYY-MM-DD" — optional so older app builds that don't send it yet keep working
+    referred_by: str | None = None  # the sharer's user id, from a ?ref= share link
 
 class ForgotRequest(BaseModel):
     phone_number: str
@@ -86,6 +87,7 @@ class EmailSignupRequest(BaseModel):
     password: str
     otp: str
     date_of_birth: str | None = None
+    referred_by: str | None = None  # the sharer's user id, from a ?ref= share link
 
 class EmailAuthRequest(BaseModel):
     email: str
@@ -228,6 +230,23 @@ def _check_age_gate(date_of_birth: str | None) -> str | None:
     return None
 
 # ============================================================
+# REFERRALS
+# ============================================================
+# Share links carry the sharer's own user id as ?ref=. A stale,
+# malformed, or tampered id should never block a signup -- it
+# should just go unrecorded, same spirit as the age gate above.
+
+def _resolve_referrer(referred_by: str | None) -> str | None:
+    """Returns referred_by back if it's a real user id, else None."""
+    if not referred_by:
+        return None
+    try:
+        result = supabase.table("users").select("id").eq("id", referred_by).execute()
+    except Exception:
+        return None
+    return referred_by if result.data else None
+
+# ============================================================
 # AUTH ROUTES
 # ============================================================
 
@@ -290,6 +309,9 @@ def signup(req: SignupRequest, request: Request):
         }
         if req.date_of_birth:
             user_data["date_of_birth"] = req.date_of_birth
+        referrer = _resolve_referrer(req.referred_by)
+        if referrer:
+            user_data["referred_by"] = referrer
         result = supabase.table("users").insert(user_data).execute()
 
         user = result.data[0]
@@ -503,6 +525,7 @@ def reset_password(req: ResetRequest, request: Request):
 class GoogleAuthRequest(BaseModel):
     id_token: str
     date_of_birth: str | None = None
+    referred_by: str | None = None  # the sharer's user id, from a ?ref= share link
 
 @router.post("/google")
 @limiter.limit("10/minute")
@@ -539,6 +562,9 @@ def google_login(req: GoogleAuthRequest, request: Request):
             }
             if req.date_of_birth:
                 new_user["date_of_birth"] = req.date_of_birth
+            referrer = _resolve_referrer(req.referred_by)
+            if referrer:
+                new_user["referred_by"] = referrer
             result = supabase.table("users").insert(new_user).execute()
             user = result.data[0]
             deletion_cancelled = False
@@ -679,6 +705,9 @@ def email_signup(req: EmailSignupRequest, request: Request):
         }
         if req.date_of_birth:
             user_data["date_of_birth"] = req.date_of_birth
+        referrer = _resolve_referrer(req.referred_by)
+        if referrer:
+            user_data["referred_by"] = referrer
         result = supabase.table("users").insert(user_data).execute()
 
         user_id = result.data[0]["id"]

@@ -89,6 +89,45 @@ def test_new_google_user_creates_a_row_and_reports_is_new_user_true():
         assert insert_call["date_of_birth"] == "1990-01-01"
 
 
+def test_new_google_user_with_a_valid_referrer_stores_it():
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info()), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
+            _mock_result([]),                    # no existing user with this email/phone
+            _mock_result([{"id": "referrer-1"}]),  # the referrer is a real user
+        ]
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = \
+            _mock_result([{"id": "user-1", "username": "Olivia"}])
+
+        google_login(
+            GoogleAuthRequest(id_token="fake-token", referred_by="referrer-1"),
+            _fake_request(),
+        )
+
+        insert_call = mock_supabase.table.return_value.insert.call_args_list[0][0][0]
+        assert insert_call["referred_by"] == "referrer-1"
+
+
+def test_new_google_user_with_a_bogus_referrer_signs_up_without_one():
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info()), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.side_effect = [
+            _mock_result([]),  # no existing user with this email/phone
+            _mock_result([]),  # "referred_by" doesn't match any real user
+        ]
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = \
+            _mock_result([{"id": "user-1", "username": "Olivia"}])
+
+        result = google_login(
+            GoogleAuthRequest(id_token="fake-token", referred_by="not-a-real-id"),
+            _fake_request(),
+        )
+
+        assert "access_token" in result
+        insert_call = mock_supabase.table.return_value.insert.call_args_list[0][0][0]
+        assert "referred_by" not in insert_call
+
+
 def test_returning_google_user_does_not_insert_and_reports_is_new_user_false():
     with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info(email="returning@example.com")), \
          patch("auth.supabase") as mock_supabase:
