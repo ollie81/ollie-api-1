@@ -752,6 +752,17 @@ def email_forgot_password(req: EmailForgotRequest, request: Request):
     try:
         result = supabase.table("users").select("id").eq("email", email).execute()
         if not result.data:
+            # This address can still be a real, long-standing account
+            # -- just one that signed up with Google, which stores its
+            # identity in `phone` (see google_login), not `email`. A
+            # flat "not found" here is actively misleading for them;
+            # telling them to use Google is what actually gets them
+            # back in. (Unlike /email/login, this route already
+            # reveals whether an email/password account exists via
+            # 404 vs 200, so this adds no new enumeration surface.)
+            google_account = supabase.table("users").select("id").eq("phone", email).execute()
+            if google_account.data:
+                raise HTTPException(status_code=400, detail="This email signed up with Google -- continue with Google instead")
             raise HTTPException(status_code=404, detail="User not found")
 
         code = _generate_otp_code()
