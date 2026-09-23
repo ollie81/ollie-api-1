@@ -829,3 +829,209 @@ def _process_image_message(
     content_type: str,
     caption: str | None,
     utc_offset_minutes: int | None,
+def _process_image_message(
+    db: OllieDB,
+    user_id: str,
+    image_bytes: bytes,
+    content_type: str,
+    caption: str | None,
+    utc_offset_minutes: int | None,
+    current_user: dict,
+) -> dict:
+    """Process an image message using the smaller vision-only pipeline."""
+    session_id = db.get_or_create_session(user_id)
+    db.remember_utc_offset(user_id, utc_offset_minutes)
+
+    language = (
+        detect_language(caption)
+        if caption and caption.strip()
+        else "english"
+    )
+
+    input_moderation = (
+        moderate_text(caption)
+        if caption and caption.strip()
+        else None
+    )
+
+    if input_moderation:
+        _flag_moderation(
+            user_id,
+            "input",
+            caption,
+            input_moderation["categories"],
+        )
+
+    memory_enabled = current_user.get("memory_enabled") is not False
+
+    if memory_enabled:
+        recall_limit = (
+            MEMORY_RECALL_LIMIT_PREMIUM
+            if is_premium_active(user_id)
+            else MEMORY_RECALL_LIMIT_FREE
+        )
+
+        memories = db.get_relevant_memories(
+            user_id,
+            limit=recall_limit,
+        )
+
+        context = db.get_user_context(user_id)
+
+        memory_block = build_memory_context(
+            memories,
+            context,
+            limit=recall_limit,
+        )
+    else:
+        memory_block = ""
+
+    raw_history = db.get_recent_messages(
+        user_id,
+        limit=24,
+    )
+
+    server_history = clean_history(raw_history)
+
+    location_block = _location_block(current_user)
+
+    system_prompt = build_system_prompt(
+        language,
+        memory_block,
+        utc_offset_minutes,
+        location_block,
+        IMAGE_REACTION_INSTRUCTIONS,
+    )
+
+    image_message = "[shared a photo]"
+
+    if caption and caption.strip():
+        image_message += f" {caption.strip()}"
+
+    user_message_id = db.save_message(
+        user_id,
+        session_id,
+        image_message,
+        "user",
+    )
+
+    reply = _get_image_reaction(
+        image_bytes,
+        content_type,
+        caption,
+        system_prompt,
+        server_history,
+    )
+
+    output_moderation = moderate_text(reply)
+
+    if output_moderation:
+        _flag_moderation(
+            user_id,
+            "output",
+            reply,
+            output_moderation["categories"],
+        )
+
+    ollie_message_id = db.save_message(
+        user_id,
+        session_id,
+        reply,
+        "ollie",
+        0.0,
+    )
+
+    streak = db.update_streak(
+        user_id,
+        utc_offset_minutes,
+    )
+
+    return {
+        "reply": reply,
+        "language": language,
+        "model_used": FAST_MODEL,
+        "streak": streak,
+        "message_id": ollie_message_id,
+        "user_message_id": user_message_id,
+    }
+
+
+@router.post("/chat/image")
+@limiter.limit("10/minute")
+async def chat_image(
+    request: Request,
+    image: UploadFile = File(...),
+    caption: str | None = Form(None),
+    utc_offset_minutes: int | None = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Receive an image and return Ollie's reaction."""
+
+    db = OllieDB()
+    user_id = current_user["id"]
+
+    content_type = (image.content_type or "").lower()
+
+    if not content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload an image file",
+        )
+
+    try:
+        image_bytes = await image.read()
+
+    except Exception as e:
+        logger.warning(
+            f"chat_image: failed to read upload for user {user_id}: {e}"
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail="Could not read image file",
+        )
+
+    if not image_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="Empty image file",
+        )
+
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail="Image is too large. Maximum size is 10MB.",
+        )
+
+    if is_premium_active(user_id):
+        db.increment_message_count(user_id)
+
+    elif not db.try_consume_message(user_id):
+        raise HTTPException(
+            status_code=429,
+            detail="Daily limit reached",
+        )
+
+    try:
+        return _process_image_message(
+            db,
+            user_id,
+            image_bytes,
+            content_type,
+            caption,
+            utc_offset_minutes,
+            current_user,
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(
+            f"chat_image route failed for user {user_id}: {e}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong, please try again",
+        )
