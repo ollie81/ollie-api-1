@@ -11,7 +11,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from config import ALLOWED_ORIGINS, SENTRY_DSN, SCHEDULER_ENABLED
+from config import ALLOWED_ORIGINS, SENTRY_DSN
 from auth import router as auth_router, cleanup_expired_refresh_tokens
 from chat import router as chat_router
 from premium import router as premium_router
@@ -29,6 +29,7 @@ sentry_sdk.init(
     dsn=SENTRY_DSN,
     send_default_pii=False,
 )
+
 # ============================================================
 # SCHEDULER — checks for due event check-ins periodically, sweeps
 # out expired refresh tokens once a day, and carries out any account
@@ -36,30 +37,55 @@ sentry_sdk.init(
 # ACCOUNT_DELETION_GRACE_DAYS)
 # ============================================================
 background_scheduler = BackgroundScheduler()
-background_scheduler.add_job(run_due_notifications, "interval", minutes=10, id="due_notifications", replace_existing=True, coalesce=True, max_instances=1)
-background_scheduler.add_job(run_daily_messages, "interval", minutes=15, id="daily_messages", replace_existing=True, coalesce=True, max_instances=1)
-background_scheduler.add_job(cleanup_expired_refresh_tokens, "interval", hours=24, id="cleanup_refresh_tokens", replace_existing=True, coalesce=True, max_instances=1)
-background_scheduler.add_job(purge_expired_account_deletions, "interval", hours=24, id="purge_account_deletions", replace_existing=True, coalesce=True, max_instances=1)
+
+background_scheduler.add_job(
+    run_due_notifications,
+    "interval",
+    minutes=10
+)
+
+background_scheduler.add_job(
+    run_daily_messages,
+    "interval",
+    minutes=15
+)
+
+background_scheduler.add_job(
+    cleanup_expired_refresh_tokens,
+    "interval",
+    hours=24
+)
+
+background_scheduler.add_job(
+    purge_expired_account_deletions,
+    "interval",
+    hours=24
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if SCHEDULER_ENABLED:
-        background_scheduler.start()
-    try:
-        yield
-    finally:
-        if SCHEDULER_ENABLED and background_scheduler.running:
-            background_scheduler.shutdown(wait=False)
+    background_scheduler.start()
+    yield
+    background_scheduler.shutdown()
+
 
 # ============================================================
 # APP SETUP
 # ============================================================
-app = FastAPI(title="Ollie API", lifespan=lifespan)
+app = FastAPI(
+    title="Ollie API",
+    lifespan=lifespan
+)
 
 limiter = Limiter(key_func=get_remote_address)
+
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_exception_handler(
+    RateLimitExceeded,
+    _rate_limit_exceeded_handler
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,21 +95,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ============================================================
 # ROUTES
 # ============================================================
-app.include_router(auth_router, prefix="/auth")
+app.include_router(
+    auth_router,
+    prefix="/auth"
+)
+
 app.include_router(chat_router)
-app.include_router(premium_router, prefix="/premium")
-app.include_router(billing_router, prefix="/billing")
-app.include_router(notifications_router, prefix="/notifications")
-app.include_router(settings_router, prefix="/settings")
-app.include_router(journey_router, prefix="/journey")
+
+app.include_router(
+    premium_router,
+    prefix="/premium"
+)
+
+app.include_router(
+    billing_router,
+    prefix="/billing"
+)
+
+app.include_router(
+    notifications_router,
+    prefix="/notifications"
+)
+
+app.include_router(
+    settings_router,
+    prefix="/settings"
+)
+
+app.include_router(
+    journey_router,
+    prefix="/journey"
+)
+
 
 @app.get("/")
 def root():
-    return {"message": "Ollie API is running 🚀"}
+    return {
+        "message": "Ollie API is running 🚀"
+    }
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok"
+    }
