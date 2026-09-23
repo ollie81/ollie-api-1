@@ -1,3 +1,4 @@
+
 import base64
 import logging
 import time
@@ -300,7 +301,13 @@ def get_ollie_response(
 # server-side backstop: guarantees a resource line ships regardless
 # of what the model said, and leaves an audit trail for follow-up.
 
-def _is_crisis_message(text: str) -> bool:
+def _is_crisis_message(text: str, moderation: dict | None = None) -> bool:
+    """Detect crisis language using both multilingual moderation and a local fallback."""
+    categories = (moderation or {}).get("categories", [])
+    if any(name in categories for name in (
+        "self_harm", "self_harm_intent", "self_harm_instructions",
+    )):
+        return True
     text_lower = (text or "").lower()
     return any(kw in text_lower for kw in CRISIS_KEYWORDS)
 
@@ -373,7 +380,7 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
         memory_block = ""
 
     # Rebuild clean history server-side — fixes amnesia
-    raw_history = db.get_recent_messages(user_id, limit=12)
+    raw_history = db.get_recent_messages(user_id, limit=24)
     server_history = clean_history(raw_history)
 
     # Decide which model handles this turn — based on the
@@ -408,7 +415,7 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
 
     # Crisis backstop — guarantee a resource line on flagged
     # messages regardless of whether the model included one.
-    if _is_crisis_message(message):
+    if _is_crisis_message(message, input_moderation):
         _flag_crisis_message(user_id, message)
         reply = reply.rstrip() + (
             "\n\nif it ever feels like too much, please reach out to "
@@ -418,68 +425,43 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     # Save Ollie reply
     ollie_message_id = db.save_message(user_id, session_id, reply, "ollie", 0.0)
 
-    # Save memory with category + importance scoring. The extraction
-    # call itself always runs, even with memory disabled, since
-    # maybe_schedule_event below reuses its importance score for an
-    # unrelated purpose (deciding whether a mentioned future event
-    # deserves a check-in reminder) -- only the actual STORE is
-    # gated on memory_enabled, so disabling memory stops Ollie from
-    # remembering personal facts/goals/mood without silently
-    # breaking reminders.
-    memory_text, category, importance = extract_memory_worthy(message)
-    if memory_text and memory_enabled:
-        db.save_memory(user_id, memory_text, importance=importance, category=category)
+    # Everything after the reply is saved is best-effort background work.
+    # A failure in memory, reminders, interests, or streak accounting must
+    # not turn an already-successful chat response into a client retry error.
+    try:
+        # Save memory with category + importance scoring.
+        memory_text, category, importance = extract_memory_worthy(message)
+        if memory_text and memory_enabled:
+            db.save_memory(user_id, memory_text, importance=importance, category=category)
 
-    if memory_enabled:
-        # Update today's mood if this message clearly conveys one —
-        # feeds the "MOOD TODAY" block back into tomorrow's context.
-        mood = detect_mood(message)
-        if mood:
-            db.update_mood(user_id, mood)
+        if memory_enabled:
+            mood = detect_mood(message)
+            if mood:
+                db.update_mood(user_id, mood)
 
-        # Save a goal if one was clearly expressed — feeds the
-        # "ACTIVE GOALS" block back into future context.
-        goal = extract_goal(message)
-        if goal:
-            db.save_goal(user_id, goal)
+            goal = extract_goal(message)
+            if goal:
+                db.save_goal(user_id, goal)
 
-        # Check if this message indicates an EXISTING active goal
-        # was just finished -- the connective tissue that lets Ollie
-        # notice "you finally got that login working" instead of
-        # just filing it as a new, unrelated memory. Closes the goal
-        # out and logs a clean accomplishment memory in one step.
-        active_goal_titles = [
-            g.get("title") for g in context.get("active_goals", [])
-            if isinstance(g, dict) and g.get("title")
-        ]
-        completed_goal = detect_goal_completion(active_goal_titles, message)
-        if completed_goal:
-            db.complete_goal(user_id, completed_goal)
-            db.save_memory(user_id, f"Accomplished: {completed_goal}", importance=3, category="accomplishment")
+            active_goal_titles = [
+                g.get("title") for g in context.get("active_goals", [])
+                if isinstance(g, dict) and g.get("title")
+            ]
+            completed_goal = detect_goal_completion(active_goal_titles, message)
+            if completed_goal:
+                db.complete_goal(user_id, completed_goal)
+                db.save_memory(user_id, f"Accomplished: {completed_goal}", importance=3, category="accomplishment")
 
-    # Check if this message describes a meaningful future event
-    # (interview, exam, first date, deadline, family event —
-    # anything, not just medical) worth a genuine check-in later.
-    # This only SCHEDULES a future notification — it does not send
-    # one now. Only runs on already-important, non-crisis messages,
-    # so it doesn't fire on every mention of a date/time.
-    maybe_schedule_event(user_id, message, importance)
+        maybe_schedule_event(user_id, message, importance)
+        maybe_schedule_reminder(user_id, message, utc_offset_minutes)
 
-    # Explicit "remind me to X" requests — independent of the
-    # importance gate above, since a reminder request may not
-    # score as memory-worthy on its own.
-    maybe_schedule_reminder(user_id, message, utc_offset_minutes)
+        if memory_enabled:
+            maybe_track_interest(user_id, message)
 
-    # Track ongoing interests/hobbies mentioned — separate,
-    # additive system. Failure here never breaks the reply. Also
-    # respects the memory toggle above, since it's still "Ollie
-    # learning things about you" in spirit.
-    if memory_enabled:
-        maybe_track_interest(user_id, message)
-
-    # Daily streak — credits at most once per local calendar day,
-    # so this is safe to call on every message.
-    streak = db.update_streak(user_id, utc_offset_minutes)
+        streak = db.update_streak(user_id, utc_offset_minutes)
+    except Exception as e:
+        logger.exception("post-response background processing failed for user %s: %s", user_id, e)
+        streak = db.get_streak(user_id)
 
     return {
         "reply": reply,
@@ -847,228 +829,4 @@ def _process_image_message(
     image_bytes: bytes,
     content_type: str,
     caption: str | None,
-    utc_offset_minutes: int | None,
-    current_user: dict,
-) -> dict:
-    session_id = db.get_or_create_session(user_id)
-    db.remember_utc_offset(user_id, utc_offset_minutes)
-
-    language = detect_language(caption) if caption and caption.strip() else "english"
-
-    # Same memory-toggle respect as the text pipeline -- see
-    # _process_chat_message.
-    if current_user.get("memory_enabled") is not False:
-        recall_limit = MEMORY_RECALL_LIMIT_PREMIUM if is_premium_active(user_id) else MEMORY_RECALL_LIMIT_FREE
-        memories = db.get_relevant_memories(user_id, limit=recall_limit)
-        context = db.get_user_context(user_id)
-        memory_block = build_memory_context(memories, context, limit=recall_limit)
-    else:
-        memory_block = ""
-
-    raw_history = db.get_recent_messages(user_id, limit=12)
-    server_history = clean_history(raw_history)
-
-    location_block = _location_block(current_user)
-    system_prompt = build_system_prompt(language, memory_block, utc_offset_minutes, location_block) + IMAGE_REACTION_INSTRUCTIONS
-
-    # The image itself is never stored -- only a text placeholder,
-    # same principle as /chat/voice only keeping the transcript,
-    # not the audio. Ollie's reply is what actually needs to persist.
-    user_display_text = f"[shared a photo] {caption.strip()}" if caption and caption.strip() else "[shared a photo]"
-    user_message_id = db.save_message(user_id, session_id, user_display_text, "user")
-
-    reply = _get_image_reaction(image_bytes, content_type, caption, system_prompt, server_history)
-
-    output_moderation = moderate_text(reply)
-    if output_moderation:
-        _flag_moderation(user_id, "output", reply, output_moderation["categories"])
-
-    ollie_message_id = db.save_message(user_id, session_id, reply, "ollie", 0.0)
-
-    streak = db.update_streak(user_id, utc_offset_minutes)
-
-    return {
-        "reply": reply,
-        "streak": streak,
-        "message_id": ollie_message_id,
-        "user_message_id": user_message_id,
-    }
-
-
-@router.post("/chat/image")
-@limiter.limit("10/minute")
-async def chat_image(
-    request: Request,
-    image: UploadFile = File(...),
-    caption: str | None = Form(None),
-    utc_offset_minutes: int | None = Form(None),
-    current_user: dict = Depends(get_current_user),
-):
-    db = OllieDB()
-    user_id = current_user["id"]
-
-    try:
-        image_bytes = await image.read()
-    except Exception as e:
-        logger.warning(f"chat_image: failed to read upload for user {user_id}: {e}")
-        raise HTTPException(status_code=400, detail="Could not read image file")
-
-    if not image_bytes:
-        raise HTTPException(status_code=400, detail="Empty image file")
-    if len(image_bytes) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail="Image is too large")
-
-    content_type = image.content_type or "image/jpeg"
-    if not content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image")
-
-    # Same free-tier gating as text chat -- a shared photo counts
-    # as a message like any other, not a separate premium feature.
-    if is_premium_active(user_id):
-        db.increment_message_count(user_id)
-    elif not db.try_consume_message(user_id):
-        raise HTTPException(status_code=429, detail="Daily limit reached")
-
-    try:
-        return _process_image_message(db, user_id, image_bytes, content_type, caption, utc_offset_minutes, current_user)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"chat_image route failed for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Something went wrong, please try again")
-
-# ============================================================
-# SPEAK ROUTE — streams directly, no file saving
-# ============================================================
-# Ollie's real cloned voice via ElevenLabs (ELEVENLABS_API_KEY +
-# ELEVENLABS_VOICE_ID) when configured; falls back to OpenAI's preset
-# TTS otherwise, same OPENAI_API_KEY already used for chat and Whisper
-# transcription so there's always a working voice even before
-# ElevenLabs is set up. Every caller (/speak, /speak/preview, and the
-# trial/premium logic around them) just deals in raw audio bytes, so
-# swapping providers only ever touches the two _synthesize_speech_*
-# functions below.
-
-# One of OpenAI's fixed preset voices, used only as the ElevenLabs
-# fallback -- change this one line to try a different one
-# (alternatives: alloy, echo, fable, nova, shimmer).
-OLLIE_TTS_VOICE = "echo"
-
-ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-
-
-def _synthesize_speech(text: str) -> bytes:
-    """
-    Raises HTTPException(500) itself on failure, so callers don't
-    need their own error handling around this.
-    """
-    if ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID:
-        return _synthesize_speech_elevenlabs(text)
-    return _synthesize_speech_openai(text)
-
-
-def _synthesize_speech_elevenlabs(text: str) -> bytes:
-    max_retries = 1
-    last_error = None
-    for attempt in range(max_retries + 1):
-        try:
-            response = requests.post(
-                ELEVENLABS_TTS_URL.format(voice_id=ELEVENLABS_VOICE_ID),
-                headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"},
-                json={"text": text, "model_id": "eleven_multilingual_v2"},
-                timeout=30,
-            )
-            response.raise_for_status()
-            return response.content
-
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"_synthesize_speech: ElevenLabs TTS request failed on attempt {attempt + 1}: {e}")
-
-        if attempt < max_retries:
-            time.sleep(0.5)
-
-    logger.error(f"_synthesize_speech: voice generation failed after retries: {last_error}")
-    raise HTTPException(status_code=500, detail="Voice generation failed")
-
-
-def _synthesize_speech_openai(text: str) -> bytes:
-    max_retries = 1
-    last_error = None
-    for attempt in range(max_retries + 1):
-        try:
-            response = openai_client.audio.speech.create(
-                model="tts-1",
-                voice=OLLIE_TTS_VOICE,
-                input=text,
-            )
-            return response.content
-
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"_synthesize_speech: OpenAI TTS request failed on attempt {attempt + 1}: {e}")
-
-        if attempt < max_retries:
-            time.sleep(0.5)
-
-    logger.error(f"_synthesize_speech: voice generation failed after retries: {last_error}")
-    raise HTTPException(status_code=500, detail="Voice generation failed")
-
-
-@router.post("/speak")
-@limiter.limit("20/minute")
-def speak(req: SpeakRequest, request: Request, current_user: dict = Depends(get_current_user)):
-    if not req.message or not req.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-
-    # Voice costs real money per use (Papla TTS). Premium is
-    # unlimited; everyone else gets a one-time ~60-second trial
-    # (across however many messages they tap the speaker icon on)
-    # so they can hear Ollie speak real replies before deciding,
-    # then it's premium-only.
-    db = OllieDB()
-    user_id = current_user["id"]
-    is_premium = is_premium_active(user_id)
-    if not is_premium:
-        try:
-            trial_ok = db.try_consume_voice_trial(user_id, estimate_speech_seconds(req.message))
-        except Exception as e:
-            logger.error(f"speak: trial check failed for user {user_id}: {e}")
-            raise HTTPException(status_code=500, detail="Could not check your voice trial, please try again")
-        if not trial_ok:
-            raise HTTPException(status_code=402, detail="Voice replies require Ollie Premium")
-
-    audio = _synthesize_speech(req.message)
-
-    # Lets the client show a live "X seconds left" indicator without
-    # a separate round-trip -- headers ride along with the binary
-    # audio body for free. Omitted for premium (nothing to count),
-    # and best-effort for the trial -- audio is already synthesized
-    # and paid for by this point, so a hiccup reading the balance
-    # must never turn an otherwise-successful reply into a hard
-    # failure for the client.
-    headers = {}
-    if not is_premium:
-        try:
-            headers["X-Voice-Trial-Remaining-Seconds"] = str(db.get_voice_trial_remaining(user_id))
-        except Exception as e:
-            logger.warning(f"speak: could not read voice trial balance for user {user_id}: {e}")
-
-    return Response(content=audio, media_type="audio/mpeg", headers=headers)
-
-
-# ============================================================
-# VOICE PREVIEW — a short, free, fixed sample of Ollie's voice,
-# so someone can hear what they'd be paying for before deciding.
-# Deliberately NOT user-controllable text (always this one line)
-# and rate-limited, so it can't be used as a free-TTS workaround.
-# ============================================================
-
-VOICE_PREVIEW_TEXT = "hey — it's ollie. this is what i actually sound like."
-
-
-@router.post("/speak/preview")
-@limiter.limit("3/day")
-def speak_preview(request: Request, current_user: dict = Depends(get_current_user)):
-    audio = _synthesize_speech(VOICE_PREVIEW_TEXT)
-    return Response(content=audio, media_type="audio/mpeg")
+    utc_offset_minutes:
