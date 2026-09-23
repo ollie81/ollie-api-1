@@ -11,7 +11,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from config import ALLOWED_ORIGINS, SENTRY_DSN
+from config import ALLOWED_ORIGINS, SENTRY_DSN, SCHEDULER_ENABLED
 from auth import router as auth_router, cleanup_expired_refresh_tokens
 from chat import router as chat_router
 from premium import router as premium_router
@@ -36,17 +36,21 @@ sentry_sdk.init(
 # ACCOUNT_DELETION_GRACE_DAYS)
 # ============================================================
 background_scheduler = BackgroundScheduler()
-background_scheduler.add_job(run_due_notifications, "interval", minutes=10)
-background_scheduler.add_job(run_daily_messages, "interval", minutes=15)
-background_scheduler.add_job(cleanup_expired_refresh_tokens, "interval", hours=24)
-background_scheduler.add_job(purge_expired_account_deletions, "interval", hours=24)
+background_scheduler.add_job(run_due_notifications, "interval", minutes=10, id="due_notifications", replace_existing=True, coalesce=True, max_instances=1)
+background_scheduler.add_job(run_daily_messages, "interval", minutes=15, id="daily_messages", replace_existing=True, coalesce=True, max_instances=1)
+background_scheduler.add_job(cleanup_expired_refresh_tokens, "interval", hours=24, id="cleanup_refresh_tokens", replace_existing=True, coalesce=True, max_instances=1)
+background_scheduler.add_job(purge_expired_account_deletions, "interval", hours=24, id="purge_account_deletions", replace_existing=True, coalesce=True, max_instances=1)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    background_scheduler.start()
-    yield
-    background_scheduler.shutdown()
+    if SCHEDULER_ENABLED:
+        background_scheduler.start()
+    try:
+        yield
+    finally:
+        if SCHEDULER_ENABLED and background_scheduler.running:
+            background_scheduler.shutdown(wait=False)
 
 # ============================================================
 # APP SETUP
