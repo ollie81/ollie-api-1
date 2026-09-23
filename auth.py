@@ -317,6 +317,7 @@ def signup(req: SignupRequest, request: Request):
         logger.error(f"signup failed for {req.phone_number}: {e}")
         raise HTTPException(status_code=500, detail="Could not create account, please try again")
 
+
 @router.post("/login")
 @limiter.limit("10/minute")
 def login(req: AuthRequest, request: Request):
@@ -355,6 +356,7 @@ def login(req: AuthRequest, request: Request):
         logger.error(f"login failed for {req.phone_number}: {e}")
         raise HTTPException(status_code=500, detail="Could not log in, please try again")
 
+
 @router.post("/refresh")
 def refresh_token(req: RefreshRequest):
     hashed = hash_refresh_token(req.refresh_token)
@@ -364,7 +366,15 @@ def refresh_token(req: RefreshRequest):
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     token_row = result.data[0]
-    expires_at = datetime.fromisoformat(token_row["expires_at"])
+
+    # Normalize the timestamp returned by Supabase so that it is
+    # always timezone-aware before comparing it with UTC "now".
+    expires_at = datetime.fromisoformat(
+        token_row["expires_at"].replace("Z", "+00:00")
+    )
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
     if datetime.now(timezone.utc) > expires_at:
         supabase.table("refresh_tokens").delete().eq("token_hash", hashed).execute()
         raise HTTPException(status_code=401, detail="Refresh token expired")
@@ -400,6 +410,7 @@ def refresh_token(req: RefreshRequest):
         "token_type": "bearer"
     }
 
+
 def cleanup_expired_refresh_tokens() -> None:
     """
     Periodic sweep for the scheduler. Expired rows otherwise only
@@ -413,11 +424,13 @@ def cleanup_expired_refresh_tokens() -> None:
     except Exception as e:
         logger.error(f"cleanup_expired_refresh_tokens failed: {e}")
 
+
 @router.post("/logout")
 def logout(req: LogoutRequest):
     hashed = hash_refresh_token(req.refresh_token)
     supabase.table("refresh_tokens").delete().eq("token_hash", hashed).execute()
     return {"success": True, "message": "Logged out"}
+
 
 @router.get("/check/{phone_number}")
 def check_user(phone_number: str):
@@ -503,6 +516,7 @@ def reset_password(req: ResetRequest, request: Request):
 class GoogleAuthRequest(BaseModel):
     id_token: str
     date_of_birth: str | None = None
+
 
 @router.post("/google")
 @limiter.limit("10/minute")
@@ -662,7 +676,16 @@ def email_signup(req: EmailSignupRequest, request: Request):
             raise HTTPException(status_code=400, detail="No pending verification for this email -- request a new code")
 
         row = pending.data[0]
-        if datetime.now(timezone.utc) > datetime.fromisoformat(row["expires_at"]):
+
+        # Normalize Supabase's timestamp so naive database values
+        # cannot be compared against timezone-aware UTC time.
+        expires_at = datetime.fromisoformat(
+            row["expires_at"].replace("Z", "+00:00")
+        )
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if datetime.now(timezone.utc) > expires_at:
             supabase.table("email_signup_otps").delete().eq("email", email).execute()
             raise HTTPException(status_code=400, detail="Code expired, please request a new one")
 
@@ -794,8 +817,17 @@ def email_reset_password(req: EmailResetRequest, request: Request):
 
         if not user.get("email_otp_hash") or not user.get("email_otp_expires_at"):
             raise HTTPException(status_code=400, detail="No pending reset for this email -- request a new code")
-        if datetime.now(timezone.utc) > datetime.fromisoformat(user["email_otp_expires_at"]):
+
+        # Normalize Supabase's timestamp before comparing it with UTC.
+        expires_at = datetime.fromisoformat(
+            user["email_otp_expires_at"].replace("Z", "+00:00")
+        )
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if datetime.now(timezone.utc) > expires_at:
             raise HTTPException(status_code=400, detail="Code expired, please request a new one")
+
         if _hash_otp(req.otp) != user["email_otp_hash"]:
             raise HTTPException(status_code=400, detail="Invalid code")
 
