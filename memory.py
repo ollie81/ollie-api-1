@@ -1,4 +1,3 @@
-
 # ============================================================
 # MEMORY — Language detection + memory helpers (production)
 # MEMORY — Language detection + memory helpers (production)
@@ -364,12 +363,12 @@ def extract_memory_worthy(text: str) -> tuple[str | None, str | None, int]:
 
     try:
         response = openai_client.chat.completions.create(
-            model=FAST_MODEL,
+            model=FLAGSHIP_MODEL,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You're deciding what a genuinely close friend would "
+                        "You are a multilingual personal-memory extractor. Understand the user's message in ANY language, including Kinyarwanda, Swahili, code-switching, slang, typos, and transliteration. Never require English and never discard a meaningful fact only because it is not English. You're deciding what a genuinely close friend would "
                         "bother remembering from this message -- not every "
                         "detail, only things worth bringing up again later: "
                         "who they are (name, background, where they live/work/"
