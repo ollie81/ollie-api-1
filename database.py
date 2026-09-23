@@ -1,3 +1,4 @@
+
 # ============================================================
 # DATABASE — OllieDB class + Supabase client
 # ============================================================
@@ -294,16 +295,37 @@ class OllieDB:
                 row["category"] = category
             self.supabase.table("memories").insert(row).execute()
 
+    # "event" memories describe a specific upcoming moment (e.g. "friend
+    # plans in a bit"), not a standing fact -- unlike other categories,
+    # they go stale. Without this, a high-importance event memory can
+    # rank at the top of get_relevant_memories forever and Ollie keeps
+    # treating a plan from weeks ago as still "coming up soon".
+    EVENT_MEMORY_MAX_AGE_DAYS = 3
+
     def get_relevant_memories(self, user_id: str, limit: int = 5):
+        # Over-fetch so that filtering out stale "event" memories below
+        # still leaves up to `limit` results when possible.
         response = self.supabase.table("memories") \
             .select("*") \
             .eq("user_id", user_id) \
             .eq("is_active", True) \
             .order("importance", desc=True) \
             .order("created_at", desc=True) \
-            .limit(limit) \
+            .limit(limit * 3) \
             .execute()
-        return response.data
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.EVENT_MEMORY_MAX_AGE_DAYS)
+        fresh = []
+        for m in (response.data or []):
+            if m.get("category") == "event":
+                created_at = m.get("created_at")
+                if created_at and self._parse_utc(created_at) < cutoff:
+                    continue  # stale event memory -- drop it from context
+            fresh.append(m)
+            if len(fresh) >= limit:
+                break
+
+        return fresh
 
     def get_all_memories(self, user_id: str, limit: int = 200):
         """
