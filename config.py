@@ -42,6 +42,9 @@ REFRESH_TOKEN_GRACE_SECONDS = 60
 
 GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON")
 ANDROID_PACKAGE_NAME = os.getenv("ANDROID_PACKAGE_NAME", "com.oliviranzi.ollie")
+# Keep rewarded-ad credits disabled until a trusted server-side verification
+# callback is configured. A client-controlled flag is not sufficient.
+AD_REWARD_VERIFICATION_ENABLED = os.getenv("AD_REWARD_VERIFICATION_ENABLED", "false").lower() == "true"
 
 # The Flutter client owns the full set of product IDs (monthly,
 # yearly, lifetime -- see purchase_service.dart) and passes whichever
@@ -97,6 +100,10 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 # ============================================================
 
 SENTRY_DSN = os.getenv("SENTRY_DSN")
+
+# Set false for web-worker deployments where a separate scheduler/worker
+# process is responsible for periodic jobs.
+SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "true").lower() == "true"
 
 # ============================================================
 # ELEVENLABS (Ollie's cloned voice) — optional. Absent means
