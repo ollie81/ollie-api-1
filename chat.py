@@ -1,4 +1,4 @@
-import base64
+        import base64
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -510,6 +510,114 @@ def chat(req: ChatRequest, request: Request, current_user: dict = Depends(get_cu
         raise HTTPException(status_code=500, detail="Something went wrong, please try again")
 
 # ============================================================
+# TEXT-TO-SPEECH
+# ============================================================
+
+OLLIE_TTS_VOICE = "alloy"
+
+
+def _synthesize_speech_elevenlabs(text: str, max_retries: int = 1) -> bytes:
+    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
+        raise HTTPException(status_code=500, detail="ElevenLabs is not configured")
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+    }
+    payload = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+    }
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            if not response.content:
+                raise RuntimeError("ElevenLabs returned empty audio")
+            return response.content
+        except Exception as e:
+            last_error = e
+            logger.warning("ElevenLabs TTS attempt %s failed: %s", attempt + 1, e)
+            if attempt < max_retries:
+                time.sleep(0.5)
+
+    logger.error("ElevenLabs TTS failed after retries: %s", last_error)
+    raise HTTPException(status_code=500, detail="Voice generation failed")
+
+
+def _synthesize_speech_openai(text: str, max_retries: int = 1) -> bytes:
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = openai_client.audio.speech.create(
+                model="gpt-4o-mini-tts",
+                voice=OLLIE_TTS_VOICE,
+                input=text,
+                response_format="mp3",
+            )
+            content = response.content
+            if not content:
+                raise RuntimeError("OpenAI TTS returned empty audio")
+            return content
+        except Exception as e:
+            last_error = e
+            logger.warning("OpenAI TTS attempt %s failed: %s", attempt + 1, e)
+            if attempt < max_retries:
+                time.sleep(0.5)
+
+    logger.error("OpenAI TTS failed after retries: %s", last_error)
+    raise HTTPException(status_code=500, detail="Voice generation failed")
+
+
+def _synthesize_speech(text: str) -> bytes:
+    if ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID:
+        return _synthesize_speech_elevenlabs(text)
+    return _synthesize_speech_openai(text)
+
+
+@router.post("/speak")
+@limiter.limit("10/minute")
+def speak(req: SpeakRequest, request: Request, current_user: dict = Depends(get_current_user)):
+    db = OllieDB()
+    user_id = current_user["id"]
+    message = req.message.strip()
+
+    if not message:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    if not is_premium_active(user_id):
+        try:
+            estimated_seconds = estimate_speech_seconds(message)
+            trial_ok = db.try_consume_voice_trial(user_id, estimated_seconds)
+        except Exception as e:
+            logger.error("speak: trial check failed for user %s: %s", user_id, e)
+            raise HTTPException(status_code=500, detail="Could not check your voice trial, please try again")
+        if not trial_ok:
+            raise HTTPException(status_code=402, detail="Voice generation requires Ollie Premium")
+
+    try:
+        audio_bytes = _synthesize_speech(message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("speak: synthesis failed for user %s: %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Voice generation failed")
+
+    headers = {}
+    if not is_premium_active(user_id):
+        try:
+            headers["X-Voice-Trial-Remaining-Seconds"] = str(db.get_voice_trial_remaining(user_id))
+        except Exception as e:
+            logger.warning("speak: could not read voice trial balance for user %s: %s", user_id, e)
+
+    return Response(content=audio_bytes, media_type="audio/mpeg", headers=headers)
+
+
+# ============================================================
 # VOICE CHAT ROUTE — record a voice message, get a real spoken-
 # to-text-to-Ollie reply back. Unlimited for premium (see
 # is_premium_active in premium.py); everyone else gets the same
@@ -822,13 +930,6 @@ def _get_image_reaction(
     return "okay i can tell you sent something but my brain glitched — send it again?"
 
 
-def _process_image_message(
-    db: OllieDB,
-    user_id: str,
-    image_bytes: bytes,
-    content_type: str,
-    caption: str | None,
-    utc_offset_minutes: int | None,
 def _process_image_message(
     db: OllieDB,
     user_id: str,
