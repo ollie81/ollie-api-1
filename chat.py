@@ -1,4 +1,3 @@
-
 import base64
 import logging
 import time
@@ -829,4 +828,4 @@ def _process_image_message(
     image_bytes: bytes,
     content_type: str,
     caption: str | None,
-    utc_offset_minutes:
+    utc_offset_minutes: int | None,
