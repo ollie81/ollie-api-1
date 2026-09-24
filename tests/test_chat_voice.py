@@ -18,7 +18,7 @@ import asyncio
 from unittest.mock import patch, MagicMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from starlette.requests import Request
 
 from chat import chat_voice
@@ -52,6 +52,7 @@ def _run(audio_bytes=b"fake audio bytes", utc_offset_minutes=None, user_id="user
     # actually branched on below, so it must be a real bool.
     return asyncio.run(chat_voice(
         request=_fake_request(),
+        background_tasks=BackgroundTasks(),
         audio=_FakeUpload(audio_bytes),
         utc_offset_minutes=utc_offset_minutes,
         mode=mode,

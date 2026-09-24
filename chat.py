@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from openai import OpenAI
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import List
@@ -346,17 +346,115 @@ def _flag_moderation(user_id: str, direction: str, text: str, categories: list) 
 # gating) before calling this.
 # ============================================================
 
-def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None, current_user: dict, mode: str | None = None, reply_to_id: str | None = None) -> dict:
+def _process_message_side_effects(
+    db: OllieDB,
+    user_id: str,
+    message: str,
+    reply: str,
+    context: dict,
+    memory_enabled: bool,
+    utc_offset_minutes: int | None,
+) -> None:
+    """
+    Runs after the reply has already been sent back to the user --
+    nothing here changes what they see this turn, only what Ollie
+    remembers or schedules for later, plus the moderation audit
+    trail. Scheduled as a FastAPI background task from /chat and
+    /chat/voice specifically because this all used to run BEFORE
+    the response went out: moderation (input + output), mood,
+    goal, and goal-completion detection, reminder detection, and
+    interest tracking are each their own model call, several with
+    no cheap pre-filter -- a normal message was paying for 7+ extra
+    sequential calls on top of the two (language detection, the
+    reply itself) that actually produce what the user is waiting
+    for. That pile-up was often enough latency on its own to trip a
+    client-side request timeout, independent of anything Railway is
+    or isn't doing.
+    """
+    try:
+        input_moderation = moderate_text(message)
+        if input_moderation:
+            _flag_moderation(user_id, "input", message, input_moderation["categories"])
+    except Exception as e:
+        logger.warning(f"post-reply input moderation failed for user {user_id}: {e}")
+
+    try:
+        output_moderation = moderate_text(reply)
+        if output_moderation:
+            _flag_moderation(user_id, "output", reply, output_moderation["categories"])
+    except Exception as e:
+        logger.warning(f"post-reply output moderation failed for user {user_id}: {e}")
+
+    # Save memory with category + importance scoring. The extraction
+    # call itself always runs, even with memory disabled, since
+    # maybe_schedule_event below reuses its importance score for an
+    # unrelated purpose (deciding whether a mentioned future event
+    # deserves a check-in reminder) -- only the actual STORE is
+    # gated on memory_enabled, so disabling memory stops Ollie from
+    # remembering personal facts/goals/mood without silently
+    # breaking reminders.
+    importance = 0
+    try:
+        memory_text, category, importance = extract_memory_worthy(message)
+        if memory_text and memory_enabled:
+            db.save_memory(user_id, memory_text, importance=importance, category=category)
+
+        if memory_enabled:
+            # Update today's mood if this message clearly conveys one —
+            # feeds the "MOOD TODAY" block back into tomorrow's context.
+            mood = detect_mood(message)
+            if mood:
+                db.update_mood(user_id, mood)
+
+            # Save a goal if one was clearly expressed — feeds the
+            # "ACTIVE GOALS" block back into future context.
+            goal = extract_goal(message)
+            if goal:
+                db.save_goal(user_id, goal)
+
+            # Check if this message indicates an EXISTING active goal
+            # was just finished -- the connective tissue that lets Ollie
+            # notice "you finally got that login working" instead of
+            # just filing it as a new, unrelated memory. Closes the goal
+            # out and logs a clean accomplishment memory in one step.
+            active_goal_titles = [
+                g.get("title") for g in context.get("active_goals", [])
+                if isinstance(g, dict) and g.get("title")
+            ]
+            completed_goal = detect_goal_completion(active_goal_titles, message)
+            if completed_goal:
+                db.complete_goal(user_id, completed_goal)
+                db.save_memory(user_id, f"Accomplished: {completed_goal}", importance=3, category="accomplishment")
+    except Exception as e:
+        logger.warning(f"post-reply memory/mood/goal extraction failed for user {user_id}: {e}")
+
+    # Check if this message describes a meaningful future event
+    # (interview, exam, first date, deadline, family event —
+    # anything, not just medical) worth a genuine check-in later.
+    # This only SCHEDULES a future notification — it does not send
+    # one now. Only runs on already-important, non-crisis messages,
+    # so it doesn't fire on every mention of a date/time.
+    maybe_schedule_event(user_id, message, importance)
+
+    # Explicit "remind me to X" requests — independent of the
+    # importance gate above, since a reminder request may not
+    # score as memory-worthy on its own.
+    maybe_schedule_reminder(user_id, message, utc_offset_minutes)
+
+    # Track ongoing interests/hobbies mentioned — separate,
+    # additive system. Failure here never breaks the reply. Also
+    # respects the memory toggle above, since it's still "Ollie
+    # learning things about you" in spirit.
+    if memory_enabled:
+        maybe_track_interest(user_id, message)
+
+
+def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_minutes: int | None, current_user: dict, background_tasks: BackgroundTasks, mode: str | None = None, reply_to_id: str | None = None) -> dict:
     session_id = db.get_or_create_session(user_id)
     db.remember_utc_offset(user_id, utc_offset_minutes)
 
     # Detect language
     language = detect_language(message)
-
-    # Moderation — audit trail only, never blocks the reply.
-    input_moderation = moderate_text(message)
-    if input_moderation:
-        _flag_moderation(user_id, "input", message, input_moderation["categories"])
 
     # Get memories + context — retrieval is skipped entirely when
     # the user has turned memory off in Settings, so Ollie stops
@@ -402,10 +500,6 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
         location_block=location_block, mode_instructions=mode_instructions,
     )
 
-    output_moderation = moderate_text(reply)
-    if output_moderation:
-        _flag_moderation(user_id, "output", reply, output_moderation["categories"])
-
     # Crisis backstop — guarantee a resource line on flagged
     # messages regardless of whether the model included one.
     if _is_crisis_message(message):
@@ -418,68 +512,18 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
     # Save Ollie reply
     ollie_message_id = db.save_message(user_id, session_id, reply, "ollie", 0.0)
 
-    # Save memory with category + importance scoring. The extraction
-    # call itself always runs, even with memory disabled, since
-    # maybe_schedule_event below reuses its importance score for an
-    # unrelated purpose (deciding whether a mentioned future event
-    # deserves a check-in reminder) -- only the actual STORE is
-    # gated on memory_enabled, so disabling memory stops Ollie from
-    # remembering personal facts/goals/mood without silently
-    # breaking reminders.
-    memory_text, category, importance = extract_memory_worthy(message)
-    if memory_text and memory_enabled:
-        db.save_memory(user_id, memory_text, importance=importance, category=category)
-
-    if memory_enabled:
-        # Update today's mood if this message clearly conveys one —
-        # feeds the "MOOD TODAY" block back into tomorrow's context.
-        mood = detect_mood(message)
-        if mood:
-            db.update_mood(user_id, mood)
-
-        # Save a goal if one was clearly expressed — feeds the
-        # "ACTIVE GOALS" block back into future context.
-        goal = extract_goal(message)
-        if goal:
-            db.save_goal(user_id, goal)
-
-        # Check if this message indicates an EXISTING active goal
-        # was just finished -- the connective tissue that lets Ollie
-        # notice "you finally got that login working" instead of
-        # just filing it as a new, unrelated memory. Closes the goal
-        # out and logs a clean accomplishment memory in one step.
-        active_goal_titles = [
-            g.get("title") for g in context.get("active_goals", [])
-            if isinstance(g, dict) and g.get("title")
-        ]
-        completed_goal = detect_goal_completion(active_goal_titles, message)
-        if completed_goal:
-            db.complete_goal(user_id, completed_goal)
-            db.save_memory(user_id, f"Accomplished: {completed_goal}", importance=3, category="accomplishment")
-
-    # Check if this message describes a meaningful future event
-    # (interview, exam, first date, deadline, family event —
-    # anything, not just medical) worth a genuine check-in later.
-    # This only SCHEDULES a future notification — it does not send
-    # one now. Only runs on already-important, non-crisis messages,
-    # so it doesn't fire on every mention of a date/time.
-    maybe_schedule_event(user_id, message, importance)
-
-    # Explicit "remind me to X" requests — independent of the
-    # importance gate above, since a reminder request may not
-    # score as memory-worthy on its own.
-    maybe_schedule_reminder(user_id, message, utc_offset_minutes)
-
-    # Track ongoing interests/hobbies mentioned — separate,
-    # additive system. Failure here never breaks the reply. Also
-    # respects the memory toggle above, since it's still "Ollie
-    # learning things about you" in spirit.
-    if memory_enabled:
-        maybe_track_interest(user_id, message)
-
     # Daily streak — credits at most once per local calendar day,
     # so this is safe to call on every message.
     streak = db.update_streak(user_id, utc_offset_minutes)
+
+    # Moderation logging, memory/mood/goal extraction, reminder and
+    # event scheduling, and interest tracking all happen AFTER the
+    # response goes out (see _process_message_side_effects) -- none
+    # of it affects this reply, only later ones or an audit log.
+    background_tasks.add_task(
+        _process_message_side_effects,
+        db, user_id, message, reply, context, memory_enabled, utc_offset_minutes,
+    )
 
     return {
         "reply": reply,
@@ -496,7 +540,7 @@ def _process_chat_message(db: OllieDB, user_id: str, message: str, utc_offset_mi
 
 @router.post("/chat")
 @limiter.limit("20/minute")
-def chat(req: ChatRequest, request: Request, current_user: dict = Depends(get_current_user)):
+def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     db = OllieDB()
     user_id = current_user["id"]
 
@@ -519,7 +563,7 @@ def chat(req: ChatRequest, request: Request, current_user: dict = Depends(get_cu
 
     try:
         return _process_chat_message(
-            db, user_id, req.message, req.utc_offset_minutes, current_user,
+            db, user_id, req.message, req.utc_offset_minutes, current_user, background_tasks,
             mode=req.mode, reply_to_id=req.reply_to_id,
         )
     except HTTPException:
@@ -541,6 +585,7 @@ def chat(req: ChatRequest, request: Request, current_user: dict = Depends(get_cu
 @limiter.limit("10/minute")
 async def chat_voice(
     request: Request,
+    background_tasks: BackgroundTasks,
     audio: UploadFile = File(...),
     utc_offset_minutes: int | None = Form(None),
     mode: str | None = Form(None),
@@ -605,7 +650,7 @@ async def chat_voice(
     db.increment_message_count(user_id)
 
     try:
-        result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes, current_user, mode=mode)
+        result = _process_chat_message(db, user_id, transcribed_text, utc_offset_minutes, current_user, background_tasks, mode=mode)
     except HTTPException:
         raise
     except Exception as e:

@@ -15,7 +15,20 @@
 
 from unittest.mock import patch, MagicMock
 
+from fastapi import BackgroundTasks
+
 from chat import _process_chat_message, _process_image_message
+
+
+def _run_background_tasks(background_tasks: BackgroundTasks) -> None:
+    """Executes whatever _process_chat_message queued via
+    background_tasks.add_task -- in a real request this runs after
+    the response is sent; here it must run before assertions, and
+    while the same chat.* patches are still active, since that's
+    where the queued call's dependencies (detect_mood, extract_goal,
+    etc.) are mocked from."""
+    for task in background_tasks.tasks:
+        task.func(*task.args, **task.kwargs)
 
 
 def _patch_common():
@@ -55,7 +68,9 @@ def _run_with_mocks(current_user):
     for p in patches:
         p.start()
     try:
-        result = _process_chat_message(db, "user-1", "I finally got the login working!", None, current_user)
+        background_tasks = BackgroundTasks()
+        result = _process_chat_message(db, "user-1", "I finally got the login working!", None, current_user, background_tasks)
+        _run_background_tasks(background_tasks)
     finally:
         for p in patches:
             p.stop()
@@ -128,7 +143,9 @@ def test_goal_completion_closes_goal_and_logs_accomplishment():
          patch("chat.maybe_schedule_event"), \
          patch("chat.maybe_schedule_reminder"), \
          patch("chat.maybe_track_interest"):
-        _process_chat_message(db, "user-1", "I finally got the login bug fixed!", None, {"id": "user-1"})
+        background_tasks = BackgroundTasks()
+        _process_chat_message(db, "user-1", "I finally got the login bug fixed!", None, {"id": "user-1"}, background_tasks)
+        _run_background_tasks(background_tasks)
 
     db.complete_goal.assert_called_once_with("user-1", "fix the login bug")
     db.save_memory.assert_called_once_with("user-1", "Accomplished: fix the login bug", importance=3, category="accomplishment")

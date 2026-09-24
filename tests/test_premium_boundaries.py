@@ -10,6 +10,8 @@
 
 from unittest.mock import patch, MagicMock
 
+from fastapi import BackgroundTasks
+
 from chat import (
     _process_chat_message,
     _process_image_message,
@@ -61,7 +63,7 @@ def _run_chat_message(is_premium):
     for p in patches:
         p.start()
     try:
-        _process_chat_message(db, "user-1", "hey", None, {"id": "user-1"})
+        _process_chat_message(db, "user-1", "hey", None, {"id": "user-1"}, BackgroundTasks())
     finally:
         for p in patches:
             p.stop()

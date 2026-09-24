@@ -15,6 +15,7 @@
 
 from unittest.mock import patch, MagicMock
 
+from fastapi import BackgroundTasks
 from starlette.requests import Request
 
 from chat import _process_chat_message, chat, ChatRequest
@@ -60,7 +61,7 @@ def test_reply_to_id_forwarded_to_user_message_save():
          patch("chat.maybe_schedule_reminder", mocks["maybe_schedule_reminder"]):
         _process_chat_message(
             db, "user-1", "about what you just said...", None,
-            {"id": "user-1", "memory_enabled": False},
+            {"id": "user-1", "memory_enabled": False}, BackgroundTasks(),
             reply_to_id="ollie-earlier-msg",
         )
 
@@ -80,7 +81,7 @@ def test_returns_both_saved_message_ids():
          patch("chat.maybe_schedule_event", mocks["maybe_schedule_event"]), \
          patch("chat.maybe_schedule_reminder", mocks["maybe_schedule_reminder"]):
         result = _process_chat_message(
-            db, "user-1", "hi", None, {"id": "user-1", "memory_enabled": False},
+            db, "user-1", "hi", None, {"id": "user-1", "memory_enabled": False}, BackgroundTasks(),
         )
 
         assert result["user_message_id"] == "uid-123"
@@ -97,7 +98,7 @@ def test_no_reply_target_passes_none_through():
          patch("chat.maybe_schedule_event", mocks["maybe_schedule_event"]), \
          patch("chat.maybe_schedule_reminder", mocks["maybe_schedule_reminder"]):
         _process_chat_message(
-            db, "user-1", "hi", None, {"id": "user-1", "memory_enabled": False},
+            db, "user-1", "hi", None, {"id": "user-1", "memory_enabled": False}, BackgroundTasks(),
         )
 
         user_save_call = db.save_message.call_args_list[0]
@@ -110,7 +111,7 @@ def test_chat_route_forwards_reply_to_id_to_process_chat_message():
          patch("chat._process_chat_message", return_value={"reply": "hi!"}) as mock_process:
         req = ChatRequest(message="about that...", reply_to_id="ollie-msg-9")
 
-        chat(req, _fake_request(), current_user={"id": "user-1"})
+        chat(req, _fake_request(), BackgroundTasks(), current_user={"id": "user-1"})
 
         mock_process.assert_called_once()
         assert mock_process.call_args.kwargs.get("reply_to_id") == "ollie-msg-9"
