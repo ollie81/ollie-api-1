@@ -393,7 +393,7 @@ def extract_memory_worthy(text: str) -> tuple[str | None, str | None, int]:
                 {"role": "user", "content": text}
             ],
             max_completion_tokens=120,
-            temperature=1,
+            temperature=0,
             timeout=10,
         )
 
@@ -466,7 +466,7 @@ def detect_goal_completion(active_goals: list[str], text: str) -> str | None:
                 {"role": "user", "content": text}
             ],
             max_completion_tokens=60,
-            temperature=1,
+            temperature=0,
             timeout=10,
         )
 
@@ -525,7 +525,7 @@ def detect_mood(text: str) -> str | None:
                 {"role": "user", "content": text}
             ],
             max_completion_tokens=40,
-            temperature=1,
+            temperature=0,
             timeout=10,
         )
 
@@ -594,7 +594,7 @@ def extract_goal(text: str) -> str | None:
                 {"role": "user", "content": text}
             ],
             max_completion_tokens=60,
-            temperature=1,
+            temperature=0,
             timeout=10,
         )
 
