@@ -7,6 +7,8 @@
 
 from unittest.mock import patch, MagicMock
 
+from fastapi import BackgroundTasks
+
 from chat import build_system_prompt, _process_chat_message
 
 
@@ -70,7 +72,7 @@ def test_mode_is_passed_through_to_get_ollie_response():
         p.start()
     try:
         with patch("chat.get_ollie_response", return_value="let's build it!") as mock_response:
-            _process_chat_message(db, "user-1", "let's work on my app", None, {"id": "user-1"}, mode="build")
+            _process_chat_message(db, "user-1", "let's work on my app", None, {"id": "user-1"}, BackgroundTasks(), mode="build")
             call_kwargs = mock_response.call_args[1]
             assert "MODE — BUILD TOGETHER:" in call_kwargs["mode_instructions"]
     finally:
@@ -91,7 +93,7 @@ def test_no_mode_passes_empty_mode_instructions():
         p.start()
     try:
         with patch("chat.get_ollie_response", return_value="hey!") as mock_response:
-            _process_chat_message(db, "user-1", "hey", None, {"id": "user-1"})
+            _process_chat_message(db, "user-1", "hey", None, {"id": "user-1"}, BackgroundTasks())
             call_kwargs = mock_response.call_args[1]
             assert call_kwargs["mode_instructions"] == ""
     finally:
@@ -112,7 +114,7 @@ def test_unknown_mode_degrades_to_no_mode():
         p.start()
     try:
         with patch("chat.get_ollie_response", return_value="hey!") as mock_response:
-            _process_chat_message(db, "user-1", "hey", None, {"id": "user-1"}, mode="not_a_real_mode")
+            _process_chat_message(db, "user-1", "hey", None, {"id": "user-1"}, BackgroundTasks(), mode="not_a_real_mode")
             call_kwargs = mock_response.call_args[1]
             assert call_kwargs["mode_instructions"] == ""
     finally:
