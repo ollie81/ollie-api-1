@@ -144,6 +144,25 @@ def test_morning_checkin_sends_when_due():
         assert update_call["last_daily_message_date"] == now.date().isoformat()
 
 
+def test_morning_checkin_saves_home_highlight_when_due():
+    # The home screen (see journey.py's home_highlight field) reads
+    # this same text back later -- it must be saved, not just sent.
+    now = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
+    target = now - timedelta(minutes=5)
+    row = _base_row(next_daily_message_at=target.isoformat())
+
+    with patch("daily_message.supabase") as mock_supabase, \
+         patch("daily_message.NotificationService"), \
+         patch("daily_message._generate_morning_checkin", return_value="you said you had that test today"):
+        _process_morning_checkin(row, now)
+
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["last_home_highlight_text"] == "you said you had that test today"
+        assert update_call["last_home_highlight_date"] == now.date().isoformat()
+        # Still a single write -- combined with _due_check's own update.
+        assert mock_supabase.table.return_value.update.call_count == 1
+
+
 def test_morning_checkin_passes_location_through_to_generation():
     now = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
     target = now - timedelta(minutes=5)
