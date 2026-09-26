@@ -161,3 +161,24 @@ def test_build_memory_context_omits_bracket_when_category_missing():
     memories = [{"memory_text": "loves hiking", "importance": 2}]
     result = build_memory_context(memories, {})
     assert "[" not in result
+
+
+def test_build_memory_context_includes_recent_days_when_present():
+    context = {"recent_summaries": [
+        {"summary_date": "2026-01-02", "summary_text": "talked about Viyo dramas"},
+        {"summary_date": "2026-01-01", "summary_text": "chatted partly in Kinyarwanda"},
+    ]}
+    result = build_memory_context([], context)
+    assert "RECENT DAYS:" in result
+    assert "2026-01-02: talked about Viyo dramas" in result
+    assert "2026-01-01: chatted partly in Kinyarwanda" in result
+
+
+def test_build_memory_context_omits_recent_days_when_absent():
+    result = build_memory_context([{"memory_text": "loves hiking", "importance": 2}], {})
+    assert "RECENT DAYS" not in result
+
+
+def test_build_memory_context_skips_malformed_summary_entries():
+    context = {"recent_summaries": ["not a dict", {"summary_text": "missing a date"}, {"summary_date": "2026-01-01"}]}
+    assert build_memory_context([], context) == ""

@@ -427,4 +427,140 @@ def test_morning_window_constants_read_as_morning():
     # Sanity guard against accidentally reverting to the old
     # all-day 8am-9pm window this replaced.
     assert 5 <= MORNING_WINDOW_START_HOUR <= 9
+
+
+# ============================================================
+# CONVERSATION SUMMARY -- permanent per-day memory, independent of
+# notification settings (see the module docstring above
+# _process_conversation_summary).
+# ============================================================
+
+# ---- _generate_conversation_summary ----
+
+def test_conversation_summary_returns_none_with_fewer_than_two_messages():
+    result = daily_message._generate_conversation_summary("user-1", [{"sender": "user", "message": "hi"}])
+    assert result is None
+
+
+def test_conversation_summary_returns_none_when_model_says_nothing():
+    with patch("daily_message.openai_client") as mock_client:
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="NOTHING"))
+        ]
+        messages = [{"sender": "user", "message": "hey"}, {"sender": "ollie", "message": "hey!"}]
+        result = daily_message._generate_conversation_summary("user-1", messages)
+        assert result is None
+
+
+def test_conversation_summary_returns_content_grounded_in_transcript():
+    with patch("daily_message.openai_client") as mock_client, \
+         patch("daily_message.moderate_text", return_value=None):
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="talked about Viyo dramas, chatted partly in Kinyarwanda"))
+        ]
+        messages = [
+            {"sender": "user", "message": "adding short dramas to Viyo now"},
+            {"sender": "ollie", "message": "that's exciting!"},
+        ]
+        result = daily_message._generate_conversation_summary("user-1", messages)
+        assert result == "talked about Viyo dramas, chatted partly in Kinyarwanda"
+
+        prompt = mock_client.chat.completions.create.call_args[1]["messages"][0]["content"]
+        assert "adding short dramas to Viyo now" in prompt
+
+
+def test_conversation_summary_flagged_content_returns_none():
+    with patch("daily_message.openai_client") as mock_client, \
+         patch("daily_message.moderate_text", return_value={"categories": ["x"]}):
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="some summary"))
+        ]
+        messages = [{"sender": "user", "message": "hey"}, {"sender": "ollie", "message": "hey!"}]
+        result = daily_message._generate_conversation_summary("user-1", messages)
+        assert result is None
+
+
+def test_conversation_summary_generation_failure_returns_none_not_raises():
+    with patch("daily_message.openai_client") as mock_client:
+        mock_client.chat.completions.create.side_effect = Exception("boom")
+        messages = [{"sender": "user", "message": "hey"}, {"sender": "ollie", "message": "hey!"}]
+        result = daily_message._generate_conversation_summary("user-1", messages)
+        assert result is None
+
+
+# ---- _process_conversation_summary ----
+
+def _summary_row(**overrides):
+    row = {"id": "user-1", "last_known_utc_offset_minutes": 0, "last_conversation_summary_date": None}
+    row.update(overrides)
+    return row
+
+
+def test_process_conversation_summary_saves_when_content_present():
+    now = datetime.now(timezone.utc).replace(hour=2, minute=0, second=0, microsecond=0)
+    row = _summary_row()
+    with patch("daily_message.OllieDB") as mock_db_cls, \
+         patch("daily_message.supabase") as mock_supabase, \
+         patch("daily_message._generate_conversation_summary", return_value="talked about Viyo"):
+        db = mock_db_cls.return_value
+        db.get_messages_between.return_value = [
+            {"sender": "user", "message": "hey"}, {"sender": "ollie", "message": "hey!"},
+        ]
+        daily_message._process_conversation_summary(row, now)
+
+        yesterday_local = now.date() - timedelta(days=1)
+        db.save_conversation_summary.assert_called_once_with("user-1", yesterday_local, "talked about Viyo")
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["last_conversation_summary_date"] == yesterday_local.isoformat()
+
+
+def test_process_conversation_summary_still_marks_the_day_done_when_nothing_to_save():
+    now = datetime.now(timezone.utc).replace(hour=2, minute=0, second=0, microsecond=0)
+    row = _summary_row()
+    with patch("daily_message.OllieDB") as mock_db_cls, \
+         patch("daily_message.supabase") as mock_supabase, \
+         patch("daily_message._generate_conversation_summary", return_value=None):
+        db = mock_db_cls.return_value
+        db.get_messages_between.return_value = []
+        daily_message._process_conversation_summary(row, now)
+
+        db.save_conversation_summary.assert_not_called()
+        mock_supabase.table.return_value.update.assert_called_once()
+
+
+def test_process_conversation_summary_skips_when_yesterday_already_processed():
+    now = datetime.now(timezone.utc).replace(hour=2, minute=0, second=0, microsecond=0)
+    yesterday_local = now.date() - timedelta(days=1)
+    row = _summary_row(last_conversation_summary_date=yesterday_local.isoformat())
+    with patch("daily_message.OllieDB") as mock_db_cls, \
+         patch("daily_message.supabase") as mock_supabase:
+        daily_message._process_conversation_summary(row, now)
+
+        mock_db_cls.return_value.get_messages_between.assert_not_called()
+        mock_supabase.table.return_value.update.assert_not_called()
+
+
+# ---- run_conversation_summaries (sweep) ----
+
+def test_run_conversation_summaries_does_not_filter_on_notifications():
+    # Unlike run_daily_messages, this must not require an fcm_token
+    # or notifications_enabled -- it's about what Ollie remembers,
+    # not what gets pushed to a phone.
+    row = _summary_row()
+    with patch("daily_message.supabase") as mock_supabase, \
+         patch("daily_message._process_conversation_summary") as mock_process:
+        mock_supabase.table.return_value.select.return_value.not_.is_.return_value.execute.return_value = \
+            MagicMock(data=[row])
+        daily_message.run_conversation_summaries()
+
+        mock_process.assert_called_once()
+
+
+def test_run_conversation_summaries_one_users_failure_does_not_block_another():
+    rows = [_summary_row(id="user-1"), _summary_row(id="user-2")]
+    with patch("daily_message.supabase") as mock_supabase, \
+         patch("daily_message._process_conversation_summary", side_effect=[Exception("boom"), None]):
+        mock_supabase.table.return_value.select.return_value.not_.is_.return_value.execute.return_value = \
+            MagicMock(data=rows)
+        daily_message.run_conversation_summaries()  # must not raise
     assert 9 <= MORNING_WINDOW_END_HOUR <= 12

@@ -409,6 +409,50 @@ class OllieDB:
             .execute()
         return response.data or []
 
+    def get_messages_between(self, user_id: str, start_utc: datetime, end_utc: datetime, limit: int = 200) -> list[dict]:
+        """
+        Same shape as get_messages_since, bounded on both ends --
+        used by the daily conversation-summary job (see
+        daily_message.py's run_conversation_summaries) to pull
+        exactly one completed local day's messages, never a partial
+        "today so far".
+        """
+        response = self.supabase.table("conversations") \
+            .select("sender, message, created_at") \
+            .eq("user_id", user_id) \
+            .gte("created_at", start_utc.isoformat()) \
+            .lt("created_at", end_utc.isoformat()) \
+            .order("created_at") \
+            .limit(limit) \
+            .execute()
+        return response.data or []
+
+    def save_conversation_summary(self, user_id: str, summary_date: date, summary_text: str) -> None:
+        """
+        Upserts on (user_id, summary_date) -- see migration 021 --
+        so this is safe to call more than once for the same day.
+        """
+        self.supabase.table("conversation_summaries").upsert({
+            "user_id": user_id,
+            "summary_date": summary_date.isoformat(),
+            "summary_text": summary_text,
+        }, on_conflict="user_id,summary_date").execute()
+
+    def get_recent_conversation_summaries(self, user_id: str, days: int = 7) -> list[dict]:
+        """
+        Most recent first -- feeds build_memory_context's "RECENT
+        DAYS" block, which is what lets Ollie answer "what did we
+        talk about a few days ago" with something real instead of
+        nothing.
+        """
+        response = self.supabase.table("conversation_summaries") \
+            .select("summary_date, summary_text") \
+            .eq("user_id", user_id) \
+            .order("summary_date", desc=True) \
+            .limit(days) \
+            .execute()
+        return response.data or []
+
     def update_mood(self, user_id: str, mood: str, note: str = None):
         today = date.today().isoformat()
         existing = self.supabase.table("moods") \
@@ -471,7 +515,8 @@ class OllieDB:
         return {
             "memories": memories,
             "today_mood": mood.data[0] if mood.data else None,
-            "active_goals": goals.data if goals.data else []
+            "active_goals": goals.data if goals.data else [],
+            "recent_summaries": self.get_recent_conversation_summaries(user_id),
         }
 
     def get_journey_summary(self, user_id: str, highlight_limit: int = 30) -> dict:
