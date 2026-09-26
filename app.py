@@ -18,7 +18,7 @@ from premium import router as premium_router
 from billing import router as billing_router
 from notifications import router as notifications_router
 from event_scheduler import run_due_notifications
-from daily_message import run_daily_messages
+from daily_message import run_daily_messages, run_conversation_summaries
 from settings import router as settings_router
 from journey import router as journey_router
 from database import purge_expired_account_deletions
@@ -48,6 +48,12 @@ background_scheduler.add_job(
     run_daily_messages,
     "interval",
     minutes=15
+)
+
+background_scheduler.add_job(
+    run_conversation_summaries,
+    "interval",
+    hours=1
 )
 
 background_scheduler.add_job(

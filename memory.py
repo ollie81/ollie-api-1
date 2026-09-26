@@ -281,6 +281,24 @@ def build_memory_context(memories: list, context: dict, limit: int = 10) -> str:
             parts.append("ACTIVE GOALS:")
             parts.extend(goal_lines)
 
+        # A short, factual line per day (see database.py's
+        # get_recent_conversation_summaries / daily_message.py's
+        # run_conversation_summaries) -- this is what lets Ollie
+        # answer "what did we talk about a few days ago" with
+        # something real, not just the isolated facts above.
+        recent_summaries = context.get("recent_summaries") or []
+        summary_lines = []
+        for s in recent_summaries:
+            if not isinstance(s, dict):
+                continue
+            text = (s.get("summary_text") or "").strip()
+            summary_date = (s.get("summary_date") or "").strip()
+            if text and summary_date:
+                summary_lines.append(f"  - {summary_date}: {text}")
+        if summary_lines:
+            parts.append("RECENT DAYS:")
+            parts.extend(summary_lines)
+
         return "\n".join(parts) if parts else ""
 
     except Exception as e:
