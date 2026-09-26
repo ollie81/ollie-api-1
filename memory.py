@@ -237,6 +237,11 @@ def build_memory_context(memories: list, context: dict, limit: int = 10) -> str:
     """
     Build structured memory block for LLM injection.
     Prioritized, capped at top `limit` (default 10), formatted cleanly.
+    Importance-3 (major/identity-level) memories are exempt from the
+    cap -- see OllieDB.get_relevant_memories, which already applies
+    this same exemption; it's repeated here defensively in case this
+    is ever called with an unfiltered list. Only importance 1-2
+    memories compete for the remaining slots.
     Defensive against malformed input — never raises.
     """
     try:
@@ -244,13 +249,16 @@ def build_memory_context(memories: list, context: dict, limit: int = 10) -> str:
 
         memories = memories or []
         context = context or {}
+        valid_memories = [m for m in memories if isinstance(m, dict)]
 
-        # Sort by importance descending, take top `limit`
-        sorted_memories = sorted(
-            memories,
-            key=lambda m: m.get("importance", 1) if isinstance(m, dict) else 1,
-            reverse=True
-        )[:limit]
+        major = [m for m in valid_memories if m.get("importance") == 3]
+        minor = sorted(
+            (m for m in valid_memories if m.get("importance") != 3),
+            key=lambda m: m.get("importance", 1),
+            reverse=True,
+        )
+        remaining = max(limit - len(major), 0)
+        sorted_memories = major + minor[:remaining]
 
         memory_lines = []
         for m in sorted_memories:

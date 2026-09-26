@@ -54,6 +54,82 @@ def test_save_memory_skips_insert_on_duplicate():
         mock_supabase.table.return_value.insert.assert_not_called()
 
 
+# ---- get_relevant_memories ----
+# Importance-3 (major/identity-level) memories are exempt from
+# `limit` -- see the comment on OllieDB.get_relevant_memories. This
+# now runs as two separate queries (importance == 3, then
+# importance < 3), each mocked independently below since .eq and
+# .lt are distinct attributes on the shared mock chain. Stale
+# "event" memories (older than EVENT_MEMORY_MAX_AGE_DAYS) are
+# filtered out of either tier, regardless of importance.
+
+def _major_chain(mock_supabase):
+    return mock_supabase.table.return_value.select.return_value.eq.return_value \
+        .eq.return_value.eq.return_value.order.return_value.execute
+
+def _minor_chain(mock_supabase):
+    return mock_supabase.table.return_value.select.return_value.eq.return_value \
+        .eq.return_value.lt.return_value.order.return_value.order.return_value.limit.return_value.execute
+
+
+def test_get_relevant_memories_returns_all_major_plus_top_minor():
+    with patch("database.supabase") as mock_supabase:
+        major_rows = [{"id": "m1", "importance": 3}, {"id": "m2", "importance": 3}]
+        minor_rows = [{"id": "m3", "importance": 2}]
+        _major_chain(mock_supabase).return_value = _mock_result(major_rows)
+        _minor_chain(mock_supabase).return_value = _mock_result(minor_rows)
+
+        db = OllieDB()
+        result = db.get_relevant_memories("user-1", limit=3)
+
+        assert result == major_rows + minor_rows
+
+
+def test_get_relevant_memories_never_drops_major_memories_past_the_limit():
+    with patch("database.supabase") as mock_supabase:
+        # 5 major memories, but limit is only 3 -- all 5 must still come back.
+        major_rows = [{"id": f"m{i}", "importance": 3} for i in range(5)]
+        _major_chain(mock_supabase).return_value = _mock_result(major_rows)
+
+        db = OllieDB()
+        result = db.get_relevant_memories("user-1", limit=3)
+
+        assert result == major_rows
+        # No slots left for the minor tier, so it's never even queried.
+        mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.lt.assert_not_called()
+
+
+def test_get_relevant_memories_drops_stale_event_memory_even_when_major():
+    with patch("database.supabase") as mock_supabase:
+        major_rows = [
+            {"id": "m1", "importance": 3, "category": "event", "created_at": "2020-01-01T00:00:00+00:00"},
+            {"id": "m2", "importance": 3, "category": "identity"},
+        ]
+        _major_chain(mock_supabase).return_value = _mock_result(major_rows)
+        _minor_chain(mock_supabase).return_value = _mock_result([])
+
+        db = OllieDB()
+        result = db.get_relevant_memories("user-1", limit=5)
+
+        assert result == [major_rows[1]]  # the stale event memory is dropped despite importance 3
+
+
+def test_get_relevant_memories_keeps_fresh_event_memory():
+    from datetime import datetime, timezone
+    with patch("database.supabase") as mock_supabase:
+        fresh_row = {
+            "id": "m1", "importance": 1, "category": "event",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _major_chain(mock_supabase).return_value = _mock_result([])
+        _minor_chain(mock_supabase).return_value = _mock_result([fresh_row])
+
+        db = OllieDB()
+        result = db.get_relevant_memories("user-1", limit=5)
+
+        assert result == [fresh_row]
+
+
 # ---- get_all_memories ----
 
 def test_get_all_memories_returns_data():
