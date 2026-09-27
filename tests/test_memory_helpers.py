@@ -137,18 +137,37 @@ def test_build_memory_context_skips_malformed_goals():
     assert build_memory_context([], context) == ""
 
 
-def test_build_memory_context_caps_at_top_ten_by_importance():
-    memories = [{"memory_text": f"fact {i}", "importance": i} for i in range(15)]
-    result = build_memory_context(memories, {})
-    assert "fact 14" in result  # importance 14, kept
-    assert "fact 0" not in result  # importance 0, cut
+def test_build_memory_context_caps_minor_memories_at_the_limit():
+    memories = [{"memory_text": f"fact {i}", "importance": 1} for i in range(15)]
+    result = build_memory_context(memories, {}, limit=10)
+    for i in range(10):
+        assert f"fact {i}" in result  # first 10 (stable sort keeps input order on ties), kept
+    for i in range(10, 15):
+        assert f"fact {i}" not in result  # past the limit, cut
 
 
-def test_build_memory_context_honors_custom_limit():
-    memories = [{"memory_text": f"fact {i}", "importance": i} for i in range(25)]
-    result = build_memory_context(memories, {}, limit=20)
-    assert "fact 5" in result  # importance 5, the 20th-highest, kept
-    assert "fact 4" not in result  # importance 4, the 21st-highest, cut
+def test_build_memory_context_never_cuts_importance_three_even_past_the_limit():
+    # Major/identity-level memories are exempt from the cap entirely --
+    # something genuinely important doesn't stop mattering just
+    # because it's outnumbered by smaller, more recent memories.
+    major = [{"memory_text": f"major {i}", "importance": 3} for i in range(12)]
+    minor = [{"memory_text": f"minor {i}", "importance": 1} for i in range(5)]
+    result = build_memory_context(major + minor, {}, limit=10)
+    for i in range(12):
+        assert f"major {i}" in result  # all 12 survive, despite limit=10
+    for i in range(5):
+        assert f"minor {i}" not in result  # no slots left once major already exceeds the limit
+
+
+def test_build_memory_context_fills_remaining_slots_with_top_minor_memories():
+    major = [{"memory_text": "major fact", "importance": 3}]
+    minor = [{"memory_text": f"fact {i}", "importance": 2} for i in range(5)] + \
+            [{"memory_text": f"fact {i}", "importance": 1} for i in range(5, 10)]
+    result = build_memory_context(major + minor, {}, limit=5)
+    assert "major fact" in result
+    for i in range(4):  # remaining = 5 - 1 major = 4 slots, highest-importance minor first
+        assert f"fact {i}" in result
+    assert "fact 4" not in result
 
 
 def test_build_memory_context_shows_category_when_present():
