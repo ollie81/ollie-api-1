@@ -473,14 +473,24 @@ def _process_morning_checkin(row: dict, now_utc: datetime) -> None:
         row, now_utc, MORNING_WINDOW_START_HOUR, MORNING_WINDOW_END_HOUR,
         "last_daily_message_date", "next_daily_message_at",
     )
-    if update:
-        supabase.table("users").update(update).eq("id", user_id).execute()
     if due:
         message = _generate_morning_checkin(
             user_id, today_local,
             country=row.get("country"), region=row.get("region"), district=row.get("district"),
         )
+        # Saved, not just sent -- so the home screen can show this
+        # same personal line to anyone who opens the app that day,
+        # notifications on or off (see journey.py's home_highlight
+        # field). Combined into update's own write rather than a
+        # second call, since _due_check already needs one here.
+        supabase.table("users").update({
+            **(update or {}),
+            "last_home_highlight_text": message,
+            "last_home_highlight_date": today_local.isoformat(),
+        }).eq("id", user_id).execute()
         NotificationService.create_notification(user_id=user_id, title="Ollie", body=message)
+    elif update:
+        supabase.table("users").update(update).eq("id", user_id).execute()
 
 
 def _process_nightly_recap(row: dict, now_utc: datetime) -> None:

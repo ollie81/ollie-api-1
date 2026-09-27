@@ -4,9 +4,10 @@
 # direct-call style as test_settings_usage.py.
 # ============================================================
 
+from datetime import date, timedelta
 from unittest.mock import patch
 
-from journey import get_journey, FREE_HIGHLIGHT_LIMIT, PREMIUM_HIGHLIGHT_LIMIT
+from journey import get_journey, FREE_HIGHLIGHT_LIMIT, PREMIUM_HIGHLIGHT_LIMIT, HOME_HIGHLIGHT_MAX_AGE_DAYS
 
 
 def _run(current_user, summary):
@@ -107,3 +108,71 @@ def test_premium_user_gets_deeper_highlight_limit_and_is_premium_true():
             "user-1", highlight_limit=PREMIUM_HIGHLIGHT_LIMIT,
         )
         assert PREMIUM_HIGHLIGHT_LIMIT > FREE_HIGHLIGHT_LIMIT
+
+
+# ---- home_highlight ----
+# The live, personal line shown on the home screen -- see
+# daily_message.py's _process_morning_checkin, which is what actually
+# saves last_home_highlight_text/_date onto the user row.
+
+def test_home_highlight_included_when_fresh():
+    today = date.today()
+    result = _run(
+        {
+            "id": "user-1", "total_active_days": 5,
+            "last_home_highlight_text": "you said you had that test today -- how'd it go?",
+            "last_home_highlight_date": today.isoformat(),
+        },
+        _EMPTY_SUMMARY,
+    )
+    assert result["home_highlight"] == "you said you had that test today -- how'd it go?"
+
+
+def test_home_highlight_included_within_max_age():
+    stale_but_ok = date.today() - timedelta(days=HOME_HIGHLIGHT_MAX_AGE_DAYS)
+    result = _run(
+        {
+            "id": "user-1", "total_active_days": 5,
+            "last_home_highlight_text": "still here for you",
+            "last_home_highlight_date": stale_but_ok.isoformat(),
+        },
+        _EMPTY_SUMMARY,
+    )
+    assert result["home_highlight"] == "still here for you"
+
+
+def test_home_highlight_omitted_when_too_stale():
+    too_old = date.today() - timedelta(days=HOME_HIGHLIGHT_MAX_AGE_DAYS + 1)
+    result = _run(
+        {
+            "id": "user-1", "total_active_days": 5,
+            "last_home_highlight_text": "you said you had that test today",
+            "last_home_highlight_date": too_old.isoformat(),
+        },
+        _EMPTY_SUMMARY,
+    )
+    assert result["home_highlight"] is None
+
+
+def test_home_highlight_omitted_when_never_generated():
+    result = _run({"id": "user-1", "total_active_days": 0}, _EMPTY_SUMMARY)
+    assert result["home_highlight"] is None
+
+
+def test_home_highlight_omitted_when_date_missing():
+    result = _run(
+        {"id": "user-1", "total_active_days": 5, "last_home_highlight_text": "hey!"},
+        _EMPTY_SUMMARY,
+    )
+    assert result["home_highlight"] is None
+
+
+def test_home_highlight_omitted_on_malformed_date():
+    result = _run(
+        {
+            "id": "user-1", "total_active_days": 5,
+            "last_home_highlight_text": "hey!", "last_home_highlight_date": "not-a-date",
+        },
+        _EMPTY_SUMMARY,
+    )
+    assert result["home_highlight"] is None
