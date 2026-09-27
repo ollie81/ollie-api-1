@@ -294,6 +294,127 @@ No greeting-card language, no "As an AI"."""
 
 
 # ============================================================
+# CONVERSATION SUMMARY — a short, permanent memory of each
+# completed local day, independent of notification settings (unlike
+# the nightly recap above, which is user-facing copy that only fires
+# when notifications are on). This is what backs build_memory_
+# context's "RECENT DAYS" block: without it, Ollie has isolated
+# facts (see memory.py's categorized extraction) but nothing that
+# answers "what did we generally talk about on day X".
+# ============================================================
+
+def _generate_conversation_summary(user_id: str, messages: list[dict]) -> str | None:
+    """
+    A short, factual memory entry for a single completed day --
+    distinct from _generate_nightly_recap's warm, multi-line
+    notification copy: this is a compact one-liner meant to sit in
+    every future prompt's memory context, so it stays cheap even
+    looking back several days. Returns None if there's nothing
+    genuine to remember (too little happened, generation failed, or
+    the model itself found nothing worth summarizing).
+    """
+    if len(messages) < 2:
+        return None
+    try:
+        transcript_lines = [
+            f"{'User' if m.get('sender') == 'user' else 'Ollie'}: {m.get('message', '')}"
+            for m in messages
+        ]
+        transcript = "\n".join(transcript_lines)[:4000]
+
+        response = openai_client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Here is a conversation between Ollie and a user, "
+                        f"all from one day:\n\n{transcript}\n\n"
+                        "Write ONE short factual sentence (max ~20 words) "
+                        "summarizing what was actually discussed -- topics, "
+                        "a notable mood, a language switch -- using ONLY "
+                        "what's genuinely in this conversation. Third "
+                        "person, no greeting, no sign-off. If it's just "
+                        "small talk with nothing worth remembering later, "
+                        "reply with exactly: NOTHING"
+                    )
+                },
+            ],
+            max_completion_tokens=60,
+            temperature=0.3,
+            timeout=15,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if not content or content == "NOTHING":
+            return None
+
+        if moderate_text(content):
+            logger.warning(f"conversation_summary: generated summary flagged for user {user_id}, skipping")
+            return None
+
+        return content
+    except Exception as e:
+        logger.warning(f"conversation_summary: generation failed for user {user_id}, skipping: {e}")
+        return None
+
+
+def _process_conversation_summary(row: dict, now_utc: datetime) -> None:
+    """
+    Runs once per user per newly-completed local day: summarizes
+    YESTERDAY once "today" has rolled over, so it only ever looks at
+    a day that's actually finished, never a partial one. Marks the
+    day processed regardless of whether a summary was actually
+    saved -- a quiet day is still a "done" day, never retried.
+    """
+    user_id = row["id"]
+    offset = timedelta(minutes=row["last_known_utc_offset_minutes"])
+    today_local = (now_utc + offset).date()
+    yesterday_local = today_local - timedelta(days=1)
+
+    last_summary_str = row.get("last_conversation_summary_date")
+    if last_summary_str and date.fromisoformat(last_summary_str) >= yesterday_local:
+        return  # already processed yesterday (or later)
+
+    db = OllieDB()
+    yesterday_start_utc = datetime.combine(yesterday_local, time(0, 0), tzinfo=timezone.utc) - offset
+    today_start_utc = datetime.combine(today_local, time(0, 0), tzinfo=timezone.utc) - offset
+    messages = db.get_messages_between(user_id, yesterday_start_utc, today_start_utc)
+
+    summary = _generate_conversation_summary(user_id, messages)
+    if summary:
+        db.save_conversation_summary(user_id, yesterday_local, summary)
+
+    supabase.table("users").update({
+        "last_conversation_summary_date": yesterday_local.isoformat(),
+    }).eq("id", user_id).execute()
+
+
+def run_conversation_summaries() -> None:
+    """
+    Call this periodically from a scheduler (independent of
+    run_daily_messages above -- this never filters on fcm_token or
+    notifications_enabled, since it's about what Ollie remembers,
+    not what gets pushed to a phone). Every eligible user is
+    independent -- one user's failure is logged and never affects
+    another's.
+    """
+    try:
+        now_utc = datetime.now(timezone.utc)
+        result = supabase.table("users") \
+            .select("id, last_known_utc_offset_minutes, last_conversation_summary_date") \
+            .not_.is_("last_known_utc_offset_minutes", "null") \
+            .execute()
+
+        for row in (result.data or []):
+            try:
+                _process_conversation_summary(row, now_utc)
+            except Exception as e:
+                logger.error(f"run_conversation_summaries: failed for user {row.get('id')}: {e}")
+    except Exception as e:
+        logger.error(f"run_conversation_summaries: query failed: {e}")
+
+
+# ============================================================
 # SHARED SCHEDULING
 # ============================================================
 
