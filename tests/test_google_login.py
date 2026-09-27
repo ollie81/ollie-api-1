@@ -89,6 +89,77 @@ def test_new_google_user_creates_a_row_and_reports_is_new_user_true():
         assert insert_call["date_of_birth"] == "1990-01-01"
 
 
+def test_new_google_user_with_valid_guest_id_upgrades_the_guest_row():
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info()), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
+            _mock_result([])  # no existing account with this email
+        mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = \
+            _mock_result([{"id": "guest-1", "is_guest": True}])  # the guest row
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = \
+            _mock_result([{"id": "guest-1", "username": "Olivia", "phone": "new@example.com"}])
+
+        result = google_login(
+            GoogleAuthRequest(id_token="fake-token", guest_id="guest-1"),
+            _fake_request(),
+        )
+
+        assert result["is_new_user"] is True
+        # Only the refresh_tokens insert happens here -- no users-row
+        # insert. The mock doesn't distinguish table names, so check
+        # the insert that did happen isn't a users-row shape, same
+        # convention as test_returning_google_user_does_not_insert...
+        insert_call = mock_supabase.table.return_value.insert.call_args[0][0]
+        assert "phone" not in insert_call and "is_guest" not in insert_call
+        update_call = mock_supabase.table.return_value.update.call_args[0][0]
+        assert update_call["is_guest"] is False
+        assert update_call["phone"] == "new@example.com"
+        mock_supabase.table.return_value.update.return_value.eq.assert_any_call("id", "guest-1")
+
+
+def test_new_google_user_with_unresolvable_guest_id_falls_back_to_normal_insert():
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info()), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
+            _mock_result([])
+        mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = \
+            _mock_result([])  # no such guest row (stale/tampered id)
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = \
+            _mock_result([{"id": "user-1", "username": "Olivia"}])
+
+        result = google_login(
+            GoogleAuthRequest(id_token="fake-token", guest_id="not-a-real-guest"),
+            _fake_request(),
+        )
+
+        assert result["is_new_user"] is True
+        mock_supabase.table.return_value.update.assert_not_called()
+        # Users insert happens first, before the later refresh_tokens
+        # insert -- same ordering test_new_google_user_with_no_dob...
+        # already relies on.
+        insert_call = mock_supabase.table.return_value.insert.call_args_list[0][0][0]
+        assert insert_call["phone"] == "new@example.com"
+
+
+def test_returning_google_user_ignores_guest_id():
+    with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info(email="returning@example.com")), \
+         patch("auth.supabase") as mock_supabase:
+        mock_supabase.table.return_value.select.return_value.eq.return_value.execute.return_value = \
+            _mock_result([{"id": "user-1", "username": "Olivia"}])
+
+        result = google_login(
+            GoogleAuthRequest(id_token="fake-token", guest_id="guest-1"),
+            _fake_request(),
+        )
+
+        assert result["is_new_user"] is False
+        mock_supabase.table.return_value.update.assert_not_called()
+        # Only the refresh_tokens insert happens on a returning login
+        # -- no users-row insert or update, guest_id or not.
+        insert_call = mock_supabase.table.return_value.insert.call_args[0][0]
+        assert "phone" not in insert_call and "username" not in insert_call
+
+
 def test_returning_google_user_does_not_insert_and_reports_is_new_user_false():
     with patch("auth.id_token.verify_oauth2_token", return_value=_mock_token_info(email="returning@example.com")), \
          patch("auth.supabase") as mock_supabase:

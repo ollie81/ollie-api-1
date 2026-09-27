@@ -636,6 +636,43 @@ class OllieDB:
         # rather than risk over-granting.
         return False
 
+    # One-time lifetime cap for guest sessions (see auth.py's
+    # /auth/guest) -- not a daily-resetting count like
+    # try_consume_message above. Once a guest upgrades to a real
+    # account, is_guest flips back to false and this stops applying;
+    # the normal daily free-tier logic takes over from there.
+    GUEST_MESSAGE_LIMIT = 10
+
+    def try_consume_guest_message(self, user_id: str) -> bool:
+        """
+        Same optimistic-concurrency shape as try_consume_message --
+        checks and increments guest_messages_used in one step, only
+        applying the write if the count still matches what was just
+        read, so two guest tabs open at once can't both slip past
+        the cap.
+        """
+        for _ in range(5):
+            result = self.supabase.table("users").select("guest_messages_used").eq("id", user_id).execute()
+            if not result.data:
+                return False
+
+            used = result.data[0].get("guest_messages_used") or 0
+            if used >= self.GUEST_MESSAGE_LIMIT:
+                return False
+
+            update_result = self.supabase.table("users") \
+                .update({"guest_messages_used": used + 1}) \
+                .eq("id", user_id) \
+                .eq("guest_messages_used", used) \
+                .execute()
+            if update_result.data:
+                return True
+            # else: count changed under us since the read above -- retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
+
     def try_consume_voice_trial(self, user_id: str, estimated_seconds: int) -> bool:
         """
         Atomic check-and-consume against the free lifetime voice

@@ -510,12 +510,97 @@ def reset_password(req: ResetRequest, request: Request):
         raise HTTPException(status_code=500, detail="Could not reset password, please try again")
 
 # ============================================================
+# GUEST MODE — someone can chat with Ollie before signing up at all
+# (see chat.py's guest message cap). A guest is a real row in this
+# table, same id used everywhere else -- just unverified and capped
+# much lower than a real free-tier account. On signup, that SAME row
+# is upgraded in place (phone/email/password filled in, is_guest set
+# back to false) rather than copying a new account's data over from
+# it -- there's nothing to copy, it's already the same row.
+# ============================================================
+
+def _resolve_guest_upgrade(guest_id: str | None) -> dict | None:
+    """
+    Returns the guest's existing row if guest_id is real and still
+    an actual unclaimed guest, else None -- a stale, tampered, or
+    already-upgraded id just means a normal fresh signup, same
+    "never block signup over this" spirit as the age gate above.
+    """
+    if not guest_id:
+        return None
+    try:
+        result = supabase.table("users").select("*").eq("id", guest_id).eq("is_guest", True).execute()
+    except Exception:
+        return None
+    return result.data[0] if result.data else None
+
+
+class GuestRequest(BaseModel):
+    guest_id: str
+
+
+@router.post("/guest")
+@limiter.limit("10/hour")
+def guest_login(req: GuestRequest, request: Request):
+    """
+    First contact for guest mode: the client generates its own id
+    (a UUID, persisted in localStorage) and this either creates a
+    lightweight guest row for it or, if that id already has one
+    (e.g. the client is calling this again after its access token
+    expired), just issues it a fresh token pair -- same guest, same
+    chat history, nothing lost.
+    """
+    try:
+        existing = supabase.table("users").select("id, is_guest").eq("id", req.guest_id).execute()
+        if existing.data:
+            row = existing.data[0]
+            if not row.get("is_guest"):
+                # Vanishingly unlikely (a client-generated UUID
+                # colliding with a real account's id), but refuse
+                # rather than ever issuing a token for someone else's
+                # real account.
+                raise HTTPException(status_code=400, detail="Invalid guest session")
+            user_id = row["id"]
+        else:
+            supabase.table("users").insert({
+                "id": req.guest_id,
+                "username": "Guest",
+                "phone": f"guest:{req.guest_id}",
+                "password_hash": "",
+                "is_guest": True,
+            }).execute()
+            user_id = req.guest_id
+
+        access_token = create_access_token(user_id)
+        refresh_token = create_refresh_token()
+        hashed_refresh = hash_refresh_token(refresh_token)
+
+        supabase.table("refresh_tokens").insert({
+            "user_id": user_id,
+            "token_hash": hashed_refresh,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)).isoformat()
+        }).execute()
+
+        return {
+            "success": True,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"guest_login failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not start a guest session, please try again")
+
+# ============================================================
 # GOOGLE LOGIN
 # ============================================================
 
 class GoogleAuthRequest(BaseModel):
     id_token: str
     date_of_birth: str | None = None
+    guest_id: str | None = None
 
 
 @router.post("/google")
@@ -553,8 +638,15 @@ def google_login(req: GoogleAuthRequest, request: Request):
             }
             if req.date_of_birth:
                 new_user["date_of_birth"] = req.date_of_birth
-            result = supabase.table("users").insert(new_user).execute()
-            user = result.data[0]
+
+            guest_row = _resolve_guest_upgrade(req.guest_id)
+            if guest_row:
+                new_user["is_guest"] = False
+                result = supabase.table("users").update(new_user).eq("id", guest_row["id"]).execute()
+                user = result.data[0] if result.data else {**guest_row, **new_user}
+            else:
+                result = supabase.table("users").insert(new_user).execute()
+                user = result.data[0]
             deletion_cancelled = False
 
         user_id = user["id"]

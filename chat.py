@@ -129,6 +129,16 @@ MEMORY_RECALL_LIMIT_FREE = 10
 MEMORY_RECALL_LIMIT_PREMIUM = 20
 
 # ============================================================
+# GUEST MODE — a distinct 429 detail string from the free-tier
+# "Daily limit reached" (see the chat() route below), so the client
+# can tell a guest hitting their one-time cap apart from a real
+# account hitting today's cap, and show "sign up" copy instead of
+# "come back tomorrow" copy.
+# ============================================================
+
+GUEST_MESSAGE_LIMIT_DETAIL = "Sign up so Ollie remembers you tomorrow"
+
+# ============================================================
 # PROMPT BUILDER
 # ============================================================
 
@@ -570,6 +580,16 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks, 
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
+    # Guest mode (see auth.py's /auth/guest) has its own much smaller,
+    # one-time cap -- checked first and never falls through to the
+    # free-tier daily one below, since a guest row's message count is
+    # tracked entirely separately. The detail string is deliberately
+    # distinct from "Daily limit reached" so the client can tell the
+    # two apart and show "sign up" copy instead of "come back
+    # tomorrow" copy.
+    if current_user.get("is_guest"):
+        if not db.try_consume_guest_message(user_id):
+            raise HTTPException(status_code=429, detail=GUEST_MESSAGE_LIMIT_DETAIL)
     # Premium bypasses the daily cap entirely (the app's own upsell
     # copy already promises unlimited messages) but still gets
     # tracked for the informational "messages used today" display in
@@ -579,7 +599,7 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks, 
     # (what this used to be): doing those as two steps lets
     # concurrent requests both read the same count and both pass,
     # since neither sees the other's increment yet.
-    if is_premium_active(user_id):
+    elif is_premium_active(user_id):
         db.increment_message_count(user_id)
     elif not db.try_consume_message(user_id):
         raise HTTPException(status_code=429, detail="Daily limit reached")
