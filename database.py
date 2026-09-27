@@ -303,29 +303,56 @@ class OllieDB:
     EVENT_MEMORY_MAX_AGE_DAYS = 3
 
     def get_relevant_memories(self, user_id: str, limit: int = 5):
-        # Over-fetch so that filtering out stale "event" memories below
-        # still leaves up to `limit` results when possible.
-        response = self.supabase.table("memories") \
-            .select("*") \
-            .eq("user_id", user_id) \
-            .eq("is_active", True) \
-            .order("importance", desc=True) \
-            .order("created_at", desc=True) \
-            .limit(limit * 3) \
-            .execute()
-
+        """
+        Importance-3 (major/identity-level) memories are exempt from
+        `limit` -- something genuinely important doesn't stop
+        mattering just because enough smaller, more recent memories
+        piled up after it over months or years. Only importance 1-2
+        memories compete for the remaining slots, most important and
+        most recent first. "event" memories still age out past
+        EVENT_MEMORY_MAX_AGE_DAYS regardless of importance (see the
+        comment above that constant), so a major-but-stale event
+        memory is filtered out of either tier.
+        """
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.EVENT_MEMORY_MAX_AGE_DAYS)
-        fresh = []
-        for m in (response.data or []):
-            if m.get("category") == "event":
-                created_at = m.get("created_at")
-                if created_at and self._parse_utc(created_at) < cutoff:
-                    continue  # stale event memory -- drop it from context
-            fresh.append(m)
-            if len(fresh) >= limit:
-                break
 
-        return fresh
+        def _drop_stale_events(rows):
+            fresh = []
+            for m in rows:
+                if m.get("category") == "event":
+                    created_at = m.get("created_at")
+                    if created_at and self._parse_utc(created_at) < cutoff:
+                        continue  # stale event memory -- drop it from context
+                fresh.append(m)
+            return fresh
+
+        major = _drop_stale_events(
+            self.supabase.table("memories")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("is_active", True)
+                .eq("importance", 3)
+                .order("created_at", desc=True)
+                .execute().data or []
+        )
+
+        remaining = max(limit - len(major), 0)
+        minor = []
+        if remaining:
+            # Over-fetch so that filtering out stale "event" memories
+            # below still leaves up to `remaining` results when possible.
+            minor_raw = self.supabase.table("memories") \
+                .select("*") \
+                .eq("user_id", user_id) \
+                .eq("is_active", True) \
+                .lt("importance", 3) \
+                .order("importance", desc=True) \
+                .order("created_at", desc=True) \
+                .limit(remaining * 3) \
+                .execute().data or []
+            minor = _drop_stale_events(minor_raw)[:remaining]
+
+        return major + minor
 
     def get_all_memories(self, user_id: str, limit: int = 200):
         """
@@ -631,6 +658,43 @@ class OllieDB:
             if result.data:
                 return True
             # else: count changed under us since the read above -- someone else incremented first, retry
+
+        # Heavy contention exhausted the retry budget -- fail closed
+        # rather than risk over-granting.
+        return False
+
+    # One-time lifetime cap for guest sessions (see auth.py's
+    # /auth/guest) -- not a daily-resetting count like
+    # try_consume_message above. Once a guest upgrades to a real
+    # account, is_guest flips back to false and this stops applying;
+    # the normal daily free-tier logic takes over from there.
+    GUEST_MESSAGE_LIMIT = 10
+
+    def try_consume_guest_message(self, user_id: str) -> bool:
+        """
+        Same optimistic-concurrency shape as try_consume_message --
+        checks and increments guest_messages_used in one step, only
+        applying the write if the count still matches what was just
+        read, so two guest tabs open at once can't both slip past
+        the cap.
+        """
+        for _ in range(5):
+            result = self.supabase.table("users").select("guest_messages_used").eq("id", user_id).execute()
+            if not result.data:
+                return False
+
+            used = result.data[0].get("guest_messages_used") or 0
+            if used >= self.GUEST_MESSAGE_LIMIT:
+                return False
+
+            update_result = self.supabase.table("users") \
+                .update({"guest_messages_used": used + 1}) \
+                .eq("id", user_id) \
+                .eq("guest_messages_used", used) \
+                .execute()
+            if update_result.data:
+                return True
+            # else: count changed under us since the read above -- retry
 
         # Heavy contention exhausted the retry budget -- fail closed
         # rather than risk over-granting.
