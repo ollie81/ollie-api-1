@@ -586,7 +586,11 @@ def guest_login(req: GuestRequest, request: Request):
         else:
             supabase.table("users").insert({
                 "id": req.guest_id,
-                "username": "Guest",
+                # users.username is unique -- a shared literal "Guest"
+                # here means only the very first guest ever created
+                # succeeds and every one after collides on it (this
+                # broke guest signups in production, see git history).
+                "username": f"Guest-{req.guest_id[:8]}",
                 "phone": f"guest:{req.guest_id}",
                 "password_hash": "",
                 "is_guest": True,
