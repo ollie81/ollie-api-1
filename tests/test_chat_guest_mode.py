@@ -33,13 +33,30 @@ def test_guest_under_cap_consumes_guest_message_not_free_tier():
          patch("chat.is_premium_active", return_value=False), \
          patch("chat._process_chat_message", return_value={"reply": "hey!"}):
         db = mock_db_cls.return_value
-        db.try_consume_guest_message.return_value = True
+        db.try_consume_guest_message.return_value = 6
 
-        _run({"id": "guest-1", "is_guest": True}, mock_db_cls, None)
+        result = _run({"id": "guest-1", "is_guest": True}, mock_db_cls, None)
 
         db.try_consume_guest_message.assert_called_once_with("guest-1")
         db.try_consume_message.assert_not_called()
         db.increment_message_count.assert_not_called()
+        assert result["guest_messages_remaining"] == 6
+        assert result["reply"] == "hey!"
+
+
+def test_guest_last_message_reports_zero_remaining_not_omitted():
+    # 0 is a real, successful remaining count, not the None/failure
+    # sentinel -- must still show up in the response.
+    with patch("chat.OllieDB") as mock_db_cls, \
+         patch("chat.is_premium_active", return_value=False), \
+         patch("chat._process_chat_message", return_value={"reply": "hey!"}):
+        db = mock_db_cls.return_value
+        db.try_consume_guest_message.return_value = 0
+
+        result = _run({"id": "guest-1", "is_guest": True}, mock_db_cls, None)
+
+        assert "guest_messages_remaining" in result
+        assert result["guest_messages_remaining"] == 0
 
 
 def test_guest_at_cap_gets_distinct_429_detail():
@@ -47,7 +64,7 @@ def test_guest_at_cap_gets_distinct_429_detail():
          patch("chat.is_premium_active", return_value=False), \
          patch("chat._process_chat_message", return_value={"reply": "hey!"}) as mock_process:
         db = mock_db_cls.return_value
-        db.try_consume_guest_message.return_value = False
+        db.try_consume_guest_message.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
             _run({"id": "guest-1", "is_guest": True}, mock_db_cls, None)
@@ -65,10 +82,11 @@ def test_real_free_tier_user_unaffected_by_guest_gate():
         db = mock_db_cls.return_value
         db.try_consume_message.return_value = True
 
-        _run({"id": "user-1", "is_guest": False}, mock_db_cls, None)
+        result = _run({"id": "user-1", "is_guest": False}, mock_db_cls, None)
 
         db.try_consume_message.assert_called_once_with("user-1")
         db.try_consume_guest_message.assert_not_called()
+        assert "guest_messages_remaining" not in result
 
 
 def test_missing_is_guest_key_treated_as_a_real_user():

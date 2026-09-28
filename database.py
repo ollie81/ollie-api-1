@@ -715,22 +715,28 @@ class OllieDB:
     # the normal daily free-tier logic takes over from there.
     GUEST_MESSAGE_LIMIT = 10
 
-    def try_consume_guest_message(self, user_id: str) -> bool:
+    def try_consume_guest_message(self, user_id: str) -> int | None:
         """
         Same optimistic-concurrency shape as try_consume_message --
         checks and increments guest_messages_used in one step, only
         applying the write if the count still matches what was just
         read, so two guest tabs open at once can't both slip past
         the cap.
+
+        Returns how many guest messages are left after this one (so
+        the client can warn before the cap hits, not just enforce it
+        at zero), or None if this message wasn't allowed through --
+        deliberately not 0/False, since 0 remaining is itself a
+        valid successful result (this was the last one).
         """
         for _ in range(5):
             result = self.supabase.table("users").select("guest_messages_used").eq("id", user_id).execute()
             if not result.data:
-                return False
+                return None
 
             used = result.data[0].get("guest_messages_used") or 0
             if used >= self.GUEST_MESSAGE_LIMIT:
-                return False
+                return None
 
             update_result = self.supabase.table("users") \
                 .update({"guest_messages_used": used + 1}) \
@@ -738,12 +744,12 @@ class OllieDB:
                 .eq("guest_messages_used", used) \
                 .execute()
             if update_result.data:
-                return True
+                return self.GUEST_MESSAGE_LIMIT - (used + 1)
             # else: count changed under us since the read above -- retry
 
         # Heavy contention exhausted the retry budget -- fail closed
         # rather than risk over-granting.
-        return False
+        return None
 
     def try_consume_voice_trial(self, user_id: str, estimated_seconds: int) -> bool:
         """

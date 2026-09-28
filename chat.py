@@ -587,8 +587,10 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks, 
     # distinct from "Daily limit reached" so the client can tell the
     # two apart and show "sign up" copy instead of "come back
     # tomorrow" copy.
+    guest_messages_remaining = None
     if current_user.get("is_guest"):
-        if not db.try_consume_guest_message(user_id):
+        guest_messages_remaining = db.try_consume_guest_message(user_id)
+        if guest_messages_remaining is None:
             raise HTTPException(status_code=429, detail=GUEST_MESSAGE_LIMIT_DETAIL)
     # Premium bypasses the daily cap entirely (the app's own upsell
     # copy already promises unlimited messages) but still gets
@@ -605,10 +607,15 @@ def chat(req: ChatRequest, request: Request, background_tasks: BackgroundTasks, 
         raise HTTPException(status_code=429, detail="Daily limit reached")
 
     try:
-        return _process_chat_message(
+        result = _process_chat_message(
             db, user_id, req.message, req.utc_offset_minutes, current_user, background_tasks,
             mode=req.mode, reply_to_id=req.reply_to_id,
         )
+        # Lets the client warn before the guest cap hits rather than
+        # only enforcing it at zero -- see try_consume_guest_message.
+        if guest_messages_remaining is not None:
+            result["guest_messages_remaining"] = guest_messages_remaining
+        return result
     except HTTPException:
         raise
     except Exception as e:
