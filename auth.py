@@ -611,8 +611,8 @@ def guest_login(req: GuestRequest, request: Request):
         }
     except HTTPException:
         raise
-    except Exception as e:
-        logger.warning(f"guest_login failed: {e}")
+    except Exception:
+        logger.exception("guest_login failed")
         raise HTTPException(status_code=500, detail="Could not start a guest session, please try again")
 
 # ============================================================
