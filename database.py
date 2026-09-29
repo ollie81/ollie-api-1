@@ -539,11 +539,19 @@ class OllieDB:
             .eq("user_id", user_id) \
             .eq("status", "active") \
             .execute()
+        # A hiccup here is a missed "remember the last few days"
+        # detail, not something worth failing the whole chat message
+        # over -- same "never block on a nice-to-have" spirit as
+        # _resolve_referrer/_resolve_guest_upgrade in auth.py.
+        try:
+            recent_summaries = self.get_recent_conversation_summaries(user_id)
+        except Exception:
+            recent_summaries = []
         return {
             "memories": memories,
             "today_mood": mood.data[0] if mood.data else None,
             "active_goals": goals.data if goals.data else [],
-            "recent_summaries": self.get_recent_conversation_summaries(user_id),
+            "recent_summaries": recent_summaries,
         }
 
     def get_journey_summary(self, user_id: str, highlight_limit: int = 30) -> dict:
