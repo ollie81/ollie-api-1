@@ -157,3 +157,18 @@ def test_get_user_context_includes_recent_summaries():
         context = OllieDB().get_user_context("user-1")
 
         assert context["recent_summaries"] == [{"summary_date": "2026-01-01", "summary_text": "talked about Viyo"}]
+
+
+def test_get_user_context_survives_recent_summaries_failure():
+    # A transient hiccup fetching recent summaries should never take
+    # the whole chat message down with it -- see chat.py's guard.
+    with patch("database.supabase") as mock_supabase, \
+         patch.object(OllieDB, "get_relevant_memories", return_value=[]), \
+         patch.object(OllieDB, "get_recent_conversation_summaries", side_effect=Exception("boom")):
+        mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = \
+            _mock_result([])
+
+        context = OllieDB().get_user_context("user-1")
+
+        assert context["recent_summaries"] == []
+        assert context["active_goals"] == []
